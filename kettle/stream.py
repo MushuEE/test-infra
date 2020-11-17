@@ -206,7 +206,7 @@ def main(db, sub, tables, client_class=make_db.GCSClient, stop=None):
 def load_sub(poll):
     """Return the PubSub subscription specified by the /-separated input."""
     project, topic, subscription = poll.split('/')
-    pubsub_client = pubsub.Client(project)
+    pubsub_client = pubsub.Client(project) # pylint: disable=no-member
     return pubsub_client.topic(topic).subscription(subscription)
 
 
