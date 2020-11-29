@@ -58,6 +58,9 @@ else:
     # This is safe because the only way we get here is by faling all attempts
     raise
 
+class BuildPathError(Exception):
+    """Raised when there are failure creating a Build Object"""
+    pass
 
 class Build:
     """
@@ -109,7 +112,7 @@ class Build:
             if self.path.startswith('gs://kubernetes-jenkins/pr-logs'):
                 prefix = 'pr:'
             else:
-                raise ValueError(f'unknown build path for {self.path} in known bucket paths')
+                raise BuildPathError(f'unknown build path for {self.path} in known bucket paths')
         build = os.path.basename(self.path)
         job = prefix + os.path.basename(os.path.dirname(self.path))
         self.job = job
@@ -278,7 +281,11 @@ def make_rows(db, builds):
     for rowid, path, started, finished in builds:
         try:
             results = db.test_results_for_build(path)
-            yield rowid, row_for_build(path, started, finished, results)
+            try:
+                yield rowid, row_for_build(path, started, finished, results)
+            except BuildPathError as error:
+                logging.error(error) # Skip on issues caused by build paths
+                continue
         except IOError:
             return
         except:  # pylint: disable=bare-except
