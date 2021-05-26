@@ -42,7 +42,6 @@ import (
 
 	"github.com/Azure/azure-storage-blob-go/azblob"
 	"github.com/Azure/go-autorest/autorest/azure"
-	uuid "github.com/satori/go.uuid"
 )
 
 const (
@@ -81,6 +80,7 @@ var (
 	aksCheckParams           = flag.Bool("aksengine-check-params", true, "Set to True if you want to validate your input parameters")
 	aksDumpClusterLogs       = flag.Bool("aksengine-dump-cluster-logs", true, "Set to True if you want to dump cluster logs")
 	aksNodeProblemDetector   = flag.Bool("aksengine-node-problem-detector", false, "Set to True if you want to enable node problem detector addon")
+	runExternalE2EGinkgoTest = flag.Bool("run-external-e2e-ginkgo-test", false, "Set to True if you want external e2e ginkgo tests for the CSI driver")
 	testCcm                  = flag.Bool("test-ccm", false, "Set to True if you want kubetest to run e2e tests for ccm")
 	testAzureFileCSIDriver   = flag.Bool("test-azure-file-csi-driver", false, "Set to True if you want kubetest to run e2e tests for Azure File CSI driver")
 	testAzureDiskCSIDriver   = flag.Bool("test-azure-disk-csi-driver", false, "Set to True if you want kubetest to run e2e tests for Azure Disk CSI driver")
@@ -291,10 +291,17 @@ func validateAzureStackCloudProfile() error {
 
 func randomAKSEngineLocation() string {
 	var AzureLocations = []string{
+		"canadacentral",
+		"centralus",
+		"eastus",
+		"eastus2",
+		"francecentral",
+		"northcentralus",
+		"northeurope",
+		"southcentralus",
+		"uksouth",
 		"westeurope",
 		"westus2",
-		"eastus2",
-		"southcentralus",
 	}
 
 	return AzureLocations[rand.Intn(len(AzureLocations))]
@@ -318,7 +325,7 @@ func checkParams() error {
 		return fmt.Errorf("no credentials file path specified")
 	}
 	if *aksResourceName == "" {
-		*aksResourceName = "kubetest-" + uuid.NewV1().String()
+		*aksResourceName = "kubetest-" + strings.ToLower(randString(8))
 	}
 	if *aksResourceGroupName == "" {
 		*aksResourceGroupName = *aksResourceName
@@ -600,6 +607,9 @@ func (c *aksEngineDeployer) populateAPIModelTemplate() error {
 			return err
 		}
 	}
+
+	// disable runUnattendedUpgradesOnBootstrap to avoid health check during node reboot
+	v.Properties.LinuxProfile.RunUnattendedUpgradesOnBootstrap = false
 
 	apiModel, _ := json.MarshalIndent(v, "", "    ")
 	c.apiModelPath = path.Join(c.outputDir, "kubernetes.json")
@@ -1101,7 +1111,7 @@ func (c *aksEngineDeployer) Build(b buildStrategy) error {
 		if c.customKubeBinaryURL, err = c.uploadToAzureStorage(newK8sNodeTarball); err != nil {
 			return err
 		}
-	} else if !*testCcm && !*testAzureDiskCSIDriver && !*testAzureFileCSIDriver && !*testBlobCSIDriver && !*testSecretStoreCSIDriver && !*testSMBCSIDriver && !*testNFSCSIDriver && !strings.EqualFold(string(b), "none") {
+	} else if (!*testCcm && !*testAzureDiskCSIDriver && !*testAzureFileCSIDriver && !*testBlobCSIDriver && !*testSecretStoreCSIDriver && !*testSMBCSIDriver && !*testNFSCSIDriver && !strings.EqualFold(string(b), "none")) || *runExternalE2EGinkgoTest {
 		// Only build the required components to run upstream e2e tests
 		for _, component := range []string{"WHAT='test/e2e/e2e.test'", "WHAT=cmd/kubectl", "ginkgo"} {
 			cmd := exec.Command("make", component)
@@ -1185,7 +1195,7 @@ func (c *aksEngineDeployer) DumpClusterLogs(localPath, gcsPath string) error {
 	}
 	if err := logDumperWindows(); err != nil {
 		// don't log error since logDumperWindows failed is expected on non-Windows cluster
-		//errors = append(errors, err.Error())
+		_ = err
 	}
 	if len(errors) != 0 {
 		return fmt.Errorf(strings.Join(errors, "\n"))
@@ -1198,6 +1208,7 @@ func (c *aksEngineDeployer) GetClusterCreated(clusterName string) (time.Time, er
 }
 
 func (c *aksEngineDeployer) setCred() error {
+	// TODO (cecile): remove old variables once the cloud provider e2e test variables are updated.
 	if err := os.Setenv("K8S_AZURE_TENANTID", c.credentials.TenantID); err != nil {
 		return err
 	}
@@ -1214,6 +1225,21 @@ func (c *aksEngineDeployer) setCred() error {
 		return err
 	}
 
+	if err := os.Setenv("AZURE_TENANT_ID", c.credentials.TenantID); err != nil {
+		return err
+	}
+	if err := os.Setenv("AZURE_SUBSCRIPTION_ID", c.credentials.SubscriptionID); err != nil {
+		return err
+	}
+	if err := os.Setenv("AZURE_CLIENT_ID", c.credentials.ClientID); err != nil {
+		return err
+	}
+	if err := os.Setenv("AZURE_CLIENT_SECRET", c.credentials.ClientSecret); err != nil {
+		return err
+	}
+	if err := os.Setenv("AZURE_LOCATION", c.location); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1292,9 +1318,23 @@ func (c *aksEngineDeployer) BuildTester(o *e2e.BuildTesterOptions) (e2e.Tester, 
 		csiDriverName = "csi-driver-nfs"
 	}
 	if csiDriverName != "" {
-		return &GinkgoCSIDriverTester{
-			driverName: csiDriverName,
-		}, nil
+		if *runExternalE2EGinkgoTest {
+			t := e2e.NewGinkgoTester(o)
+			if o.StorageTestDriverPath != "" {
+				t.StorageTestDriver = filepath.Join(util.K8sSigs(csiDriverName), o.StorageTestDriverPath)
+			}
+			t.KubeRoot = "."
+			kubeConfig := os.Getenv("KUBECONFIG")
+			if kubeConfig != "" {
+				t.Kubeconfig = kubeConfig
+			}
+			t.Provider = "azure"
+			return t, nil
+		} else {
+			return &GinkgoCSIDriverTester{
+				driverName: csiDriverName,
+			}, nil
+		}
 	}
 
 	// Run e2e tests from upstream k8s repo

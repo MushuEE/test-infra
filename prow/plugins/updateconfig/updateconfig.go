@@ -24,6 +24,7 @@ import (
 	"io/ioutil"
 	"path"
 	"path/filepath"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/mattn/go-zglob"
@@ -98,7 +99,7 @@ func (g *OSFileGetter) GetFile(filename string) ([]byte, error) {
 // Update updates the configmap with the data from the identified files.
 // Existing configmap keys that are not included in the updates are left alone
 // unless bootstrap is true in which case they are deleted.
-func Update(fg FileGetter, kc corev1.ConfigMapInterface, name, namespace string, updates []ConfigMapUpdate, bootstrap bool, metrics *prometheus.GaugeVec, logger *logrus.Entry) error {
+func Update(fg FileGetter, kc corev1.ConfigMapInterface, name, namespace string, updates []ConfigMapUpdate, bootstrap bool, metrics *prometheus.GaugeVec, logger *logrus.Entry, sha string) error {
 	cm, getErr := kc.Get(context.TODO(), name, metav1.GetOptions{})
 	isNotFound := errors.IsNotFound(getErr)
 	if getErr != nil && !isNotFound {
@@ -115,6 +116,9 @@ func Update(fg FileGetter, kc corev1.ConfigMapInterface, name, namespace string,
 	}
 	if cm.Data == nil || bootstrap {
 		cm.Data = map[string]string{}
+	}
+	if sha != "" {
+		cm.Data[config.ConfigVersionFileName] = sha
 	}
 	if cm.BinaryData == nil || bootstrap {
 		cm.BinaryData = map[string][]byte{}
@@ -224,10 +228,19 @@ func FilterChanges(cfg plugins.ConfigUpdater, changes []github.PullRequestChange
 				id := plugins.ConfigMapID{Name: cm.Name, Namespace: ns, Cluster: cluster}
 				key := cm.Key
 				if key == "" {
-					key = path.Base(change.Filename)
+					if cm.UseFullPathAsKey {
+						key = strings.ReplaceAll(change.Filename, "/", "-")
+					} else {
+						key = path.Base(change.Filename)
+					}
 					// if the key changed, we need to remove the old key
 					if change.Status == github.PullRequestFileRenamed {
-						oldKey := path.Base(change.PreviousFilename)
+						var oldKey string
+						if cm.UseFullPathAsKey {
+							oldKey = strings.ReplaceAll(change.PreviousFilename, "/", "-")
+						} else {
+							oldKey = path.Base(change.PreviousFilename)
+						}
 						// not setting the filename field will cause the key to be
 						// deleted
 						toUpdate[id] = append(toUpdate[id], ConfigMapUpdate{Key: oldKey})
@@ -335,7 +348,7 @@ func handle(gc githubClient, gitClient git.ClientFactory, kc corev1.ConfigMapsGe
 			errs = append(errs, err)
 			continue
 		}
-		if err := Update(&OSFileGetter{Root: gitRepo.Directory()}, configMapClient, cm.Name, cm.Namespace, data, bootstrapMode, metrics, logger); err != nil {
+		if err := Update(&OSFileGetter{Root: gitRepo.Directory()}, configMapClient, cm.Name, cm.Namespace, data, bootstrapMode, metrics, logger, *pr.MergeSHA); err != nil {
 			errs = append(errs, err)
 			continue
 		}

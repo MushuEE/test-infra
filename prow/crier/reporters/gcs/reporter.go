@@ -43,8 +43,8 @@ type gcsReporter struct {
 	author util.Author
 }
 
-func (gr *gcsReporter) Report(log *logrus.Entry, pj *prowv1.ProwJob) ([]*prowv1.ProwJob, *reconcile.Result, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second) // TODO: pass through a global context?
+func (gr *gcsReporter) Report(ctx context.Context, log *logrus.Entry, pj *prowv1.ProwJob) ([]*prowv1.ProwJob, *reconcile.Result, error) {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 
 	_, _, err := util.GetJobDestination(gr.cfg, pj)
@@ -138,14 +138,14 @@ func (gr *gcsReporter) reportProwjob(ctx context.Context, log *logrus.Entry, pj 
 		log.WithFields(logrus.Fields{"bucketName": bucketName, "dir": dir}).Debug("Would upload pod info")
 		return nil
 	}
-	return util.WriteContent(ctx, log, gr.author, bucketName, path.Join(dir, "prowjob.json"), true, output)
+	return util.WriteContent(ctx, log, gr.author, bucketName, path.Join(dir, prowv1.ProwJobFile), true, output)
 }
 
 func (gr *gcsReporter) GetName() string {
 	return reporterName
 }
 
-func (gr *gcsReporter) ShouldReport(_ *logrus.Entry, pj *prowv1.ProwJob) bool {
+func (gr *gcsReporter) ShouldReport(_ context.Context, _ *logrus.Entry, pj *prowv1.ProwJob) bool {
 	// We can only report jobs once they have a build ID. By denying responsibility
 	// for it until it has one, crier will not mark us as having handled it until
 	// it is possible for us to handle it, ensuring that we get a chance to see it.

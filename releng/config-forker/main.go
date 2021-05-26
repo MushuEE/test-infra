@@ -85,8 +85,6 @@ func generatePresubmits(c config.JobConfig, version string) (map[string][]config
 			p := presubmit
 			p.SkipBranches = nil
 			p.Branches = []string{"release-" + version}
-			p.Context = generatePresubmitContextVariant(p.Name, p.Context, version)
-			p.Name = generatePresubmitNameVariant(p.Name, version)
 			if p.Spec != nil {
 				for i := range p.Spec.Containers {
 					c := &p.Spec.Containers[i]
@@ -106,6 +104,13 @@ func generatePresubmits(c config.JobConfig, version string) (map[string][]config
 	return newPresubmits, nil
 }
 
+func shouldDecorate(c *config.JobConfig, util config.UtilityConfig) bool {
+	if util.Decorate != nil {
+		return *util.Decorate
+	}
+	return c.DecorateAllJobs
+}
+
 func generatePeriodics(conf config.JobConfig, version string) ([]config.Periodic, error) {
 	var newPeriodics []config.Periodic
 	for _, periodic := range conf.Periodics {
@@ -119,7 +124,7 @@ func generatePeriodics(conf config.JobConfig, version string) ([]config.Periodic
 				c := &p.Spec.Containers[i]
 				c.Image = fixImage(c.Image, version)
 				c.Env = fixEnvVars(c.Env, version)
-				if !config.ShouldDecorate(&conf, p.JobBase.UtilityConfig) {
+				if !shouldDecorate(&conf, p.JobBase.UtilityConfig) {
 					c.Command = fixBootstrapArgs(c.Command, version)
 					c.Args = fixBootstrapArgs(c.Args, version)
 				}
@@ -130,7 +135,7 @@ func generatePeriodics(conf config.JobConfig, version string) ([]config.Periodic
 				}
 			}
 		}
-		if config.ShouldDecorate(&conf, p.JobBase.UtilityConfig) {
+		if shouldDecorate(&conf, p.JobBase.UtilityConfig) {
 			p.ExtraRefs = fixExtraRefs(p.ExtraRefs, version)
 		}
 		if interval, ok := p.Annotations[periodicIntervalAnnotation]; ok {
@@ -322,10 +327,8 @@ annotations:
 				v += ", " + "sig-release-job-config-errors"
 			}
 			didDashboards = true
-			break
 		case testgridTabNameAnnotation:
 			v = strings.ReplaceAll(v, "master", version)
-			break
 		case descriptionAnnotation:
 			continue annotations
 		}
@@ -351,28 +354,6 @@ func generateNameVariant(name, version string, generic bool) string {
 		return name + suffix
 	}
 	return strings.ReplaceAll(name, "-master", suffix)
-}
-
-func generatePresubmitNameVariant(name, version string) string {
-	suffix := "-" + version
-	if !strings.HasSuffix(name, "-master") {
-		return name + suffix
-	}
-	return strings.ReplaceAll(name, "-master", suffix)
-}
-
-func generatePresubmitContextVariant(name, context, version string) string {
-	suffix := "-" + version
-
-	if context != "" {
-		return strings.ReplaceAll(context, "-master", suffix)
-	}
-
-	context = name
-	if !strings.HasSuffix(context, "-master") {
-		return context + suffix
-	}
-	return strings.ReplaceAll(context, "-master", suffix)
 }
 
 type options struct {

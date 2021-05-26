@@ -36,6 +36,7 @@ import (
 	"k8s.io/test-infra/prow/github"
 	"k8s.io/test-infra/prow/pkg/layeredsets"
 	"k8s.io/test-infra/prow/plugins"
+	"k8s.io/test-infra/prow/plugins/ownersconfig"
 	"k8s.io/test-infra/prow/repoowners"
 )
 
@@ -111,7 +112,11 @@ type fakeOwnersClient struct {
 	reviewers         map[string]layeredsets.String
 	requiredReviewers map[string]sets.String
 	leafReviewers     map[string]sets.String
-	dirBlacklist      []*regexp.Regexp
+	dirDenylist       []*regexp.Regexp
+}
+
+func (foc *fakeOwnersClient) Filenames() ownersconfig.Filenames {
+	return ownersconfig.FakeFilenames
 }
 
 func (foc *fakeOwnersClient) Approvers(path string) layeredsets.String {
@@ -150,9 +155,13 @@ func (foc *fakeOwnersClient) IsNoParentOwners(path string) bool {
 	return false
 }
 
+func (foc *fakeOwnersClient) IsAutoApproveUnownedSubfolders(path string) bool {
+	return false
+}
+
 func (foc *fakeOwnersClient) ParseSimpleConfig(path string) (repoowners.SimpleConfig, error) {
 	dir := filepath.Dir(path)
-	for _, re := range foc.dirBlacklist {
+	for _, re := range foc.dirDenylist {
 		if re.MatchString(dir) {
 			return repoowners.SimpleConfig{}, filepath.SkipDir
 		}
@@ -169,7 +178,7 @@ func (foc *fakeOwnersClient) ParseSimpleConfig(path string) (repoowners.SimpleCo
 
 func (foc *fakeOwnersClient) ParseFullConfig(path string) (repoowners.FullConfig, error) {
 	dir := filepath.Dir(path)
-	for _, re := range foc.dirBlacklist {
+	for _, re := range foc.dirDenylist {
 		if re.MatchString(dir) {
 			return repoowners.FullConfig{}, filepath.SkipDir
 		}

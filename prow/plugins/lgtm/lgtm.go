@@ -48,7 +48,7 @@ var (
 	// LGTMRe is the regex that matches lgtm comments
 	LGTMRe = regexp.MustCompile(`(?mi)^/lgtm(?: no-issue)?\s*$`)
 	// LGTMCancelRe is the regex that matches lgtm cancel comments
-	LGTMCancelRe        = regexp.MustCompile(`(?mi)^/lgtm cancel\s*$`)
+	LGTMCancelRe        = regexp.MustCompile(`(?mi)^/(remove-lgtm|lgtm cancel)\s*$`)
 	removeLGTMLabelNoti = "New changes are detected. LGTM label has been removed."
 )
 
@@ -111,11 +111,11 @@ func helpProvider(config *plugins.Configuration, enabledRepos []config.OrgRepo) 
 		Snippet:     yamlSnippet,
 	}
 	pluginHelp.AddCommand(pluginhelp.Command{
-		Usage:       "/lgtm [cancel] or GitHub Review action",
+		Usage:       "/[remove-]lgtm [cancel] or GitHub Review action",
 		Description: "Adds or removes the 'lgtm' label which is typically used to gate merging.",
 		Featured:    true,
 		WhoCanUse:   "Collaborators on the repository. '/lgtm cancel' can be used additionally by the PR author.",
-		Examples:    []string{"/lgtm", "/lgtm cancel", "<a href=\"https://help.github.com/articles/about-pull-request-reviews/\">'Approve' or 'Request Changes'</a>"},
+		Examples:    []string{"/lgtm", "/lgtm cancel", "/remove-lgtm", "<a href=\"https://help.github.com/articles/about-pull-request-reviews/\">'Approve' or 'Request Changes'</a>"},
 	})
 	return pluginHelp, nil
 }
@@ -131,8 +131,8 @@ type githubClient interface {
 	GetPullRequestChanges(org, repo string, number int) ([]github.PullRequestChange, error)
 	ListIssueComments(org, repo string, number int) ([]github.IssueComment, error)
 	DeleteComment(org, repo string, ID int) error
-	BotName() (string, error)
-	GetSingleCommit(org, repo, SHA string) (github.SingleCommit, error)
+	BotUserChecker() (func(candidate string) bool, error)
+	GetSingleCommit(org, repo, SHA string) (github.RepositoryCommit, error)
 	IsMember(org, user string) (bool, error)
 	ListTeams(org string) ([]github.Team, error)
 	ListTeamMembers(org string, id int, role string) ([]github.TeamMember, error)
@@ -428,7 +428,7 @@ func handlePullRequest(log *logrus.Entry, gc githubClient, config *plugins.Confi
 	if opts.StoreTreeHash {
 		// Check if we have a tree-hash comment
 		var lastLgtmTreeHash string
-		botName, err := gc.BotName()
+		botUserChecker, err := gc.BotUserChecker()
 		if err != nil {
 			return err
 		}
@@ -441,7 +441,7 @@ func handlePullRequest(log *logrus.Entry, gc githubClient, config *plugins.Confi
 		for i := len(comments) - 1; i >= 0; i-- {
 			comment := comments[i]
 			m := addLGTMLabelNotificationRe.FindStringSubmatch(comment.Body)
-			if comment.User.Login == botName && m != nil && comment.UpdatedAt.Equal(comment.CreatedAt) {
+			if botUserChecker(comment.User.Login) && m != nil && comment.UpdatedAt.Equal(comment.CreatedAt) {
 				lastLgtmTreeHash = m[1]
 				break
 			}

@@ -21,21 +21,25 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
 	"time"
 
+	"sigs.k8s.io/yaml"
+
 	"github.com/sirupsen/logrus"
 
-	"k8s.io/apimachinery/pkg/util/sets"
-
+	"github.com/google/go-cmp/cmp"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	"k8s.io/test-infra/prow/bugzilla"
 	"k8s.io/test-infra/prow/kube"
 	"k8s.io/test-infra/prow/labels"
 	"k8s.io/test-infra/prow/logrusutil"
+	"k8s.io/test-infra/prow/plugins/ownersconfig"
 )
 
 const (
@@ -46,10 +50,10 @@ const (
 type Configuration struct {
 	// Plugins is a map of repositories (eg "k/k") to lists of
 	// plugin names.
-	// You can find a comprehensive list of the default avaulable plugins here
+	// You can find a comprehensive list of the default available plugins here
 	// https://github.com/kubernetes/test-infra/tree/master/prow/plugins
 	// note that you're also able to add external plugins.
-	Plugins map[string][]string `json:"plugins,omitempty"`
+	Plugins Plugins `json:"plugins,omitempty"`
 
 	// ExternalPlugins is a map of repositories (eg "k/k") to lists of
 	// external plugins.
@@ -59,7 +63,6 @@ type Configuration struct {
 	Owners Owners `json:"owners,omitempty"`
 
 	// Built-in plugins specific configuration.
-
 	Approve              []Approve                    `json:"approve,omitempty"`
 	Blockades            []Blockade                   `json:"blockades,omitempty"`
 	Blunderbuss          Blunderbuss                  `json:"blunderbuss,omitempty"`
@@ -73,12 +76,12 @@ type Configuration struct {
 	Heart                Heart                        `json:"heart,omitempty"`
 	Label                Label                        `json:"label,omitempty"`
 	Lgtm                 []Lgtm                       `json:"lgtm,omitempty"`
+	Jira                 *Jira                        `json:"jira,omitempty"`
 	MilestoneApplier     map[string]BranchToMilestone `json:"milestone_applier,omitempty"`
 	RepoMilestone        map[string]Milestone         `json:"repo_milestone,omitempty"`
 	Project              ProjectConfig                `json:"project_config,omitempty"`
 	ProjectManager       ProjectManager               `json:"project_manager,omitempty"`
 	RequireMatchingLabel []RequireMatchingLabel       `json:"require_matching_label,omitempty"`
-	RequireSIG           RequireSIG                   `json:"requiresig,omitempty"`
 	Retitle              Retitle                      `json:"retitle,omitempty"`
 	Slack                Slack                        `json:"slack,omitempty"`
 	SigMention           SigMention                   `json:"sigmention,omitempty"`
@@ -86,6 +89,19 @@ type Configuration struct {
 	Triggers             []Trigger                    `json:"triggers,omitempty"`
 	Welcome              []Welcome                    `json:"welcome,omitempty"`
 	Override             Override                     `json:"override,omitempty"`
+	Help                 Help                         `json:"help,omitempty"`
+}
+
+type Help struct {
+	// HelpGuidelinesURL is the URL of the help page, which provides guidance on how and when to use the help wanted and good first issue labels.
+	// The default value is "https://git.k8s.io/community/contributors/guide/help-wanted.md".
+	HelpGuidelinesURL string `json:"help_guidelines_url,omitempty"`
+}
+
+func (h *Help) setDefaults() {
+	if h.HelpGuidelinesURL == "" {
+		h.HelpGuidelinesURL = "https://git.k8s.io/community/contributors/guide/help-wanted.md"
+	}
 }
 
 // Golint holds configuration for the golint plugin
@@ -94,6 +110,14 @@ type Golint struct {
 	// in (0,1] over which problems will be printed. Defaults to
 	// 0.8, as does the `go lint` tool.
 	MinimumConfidence *float64 `json:"minimum_confidence,omitempty"`
+}
+
+// Plugins maps orgOrRepo to plugins
+type Plugins map[string]OrgPlugins
+
+type OrgPlugins struct {
+	ExcludedRepos []string `json:"excluded_repos,omitempty"`
+	Plugins       []string `json:"plugins,omitempty"`
 }
 
 // ExternalPlugin holds configuration for registering an external
@@ -152,10 +176,30 @@ type Owners struct {
 	// control in the provided repos.
 	SkipCollaborators []string `json:"skip_collaborators,omitempty"`
 
-	// LabelsBlackList holds a list of labels that should not be present in any
+	// LabelsDenyList holds a list of labels that should not be present in any
 	// OWNERS file, preventing their automatic addition by the owners-label plugin.
 	// This check is performed by the verify-owners plugin.
+	LabelsDenyList []string `json:"labels_denylist,omitempty"`
+
+	// LabelsBlackList will be removed after October 2021, use
+	// labels_denylist instead
 	LabelsBlackList []string `json:"labels_blacklist,omitempty"`
+
+	// Filenames allows configuring repos to use a separate set of filenames for
+	// any plugin that interacts with these files. Keys are in "org/repo" format.
+	Filenames map[string]ownersconfig.Filenames `json:"filenames,omitempty"`
+}
+
+// OwnersFilenames determines which filenames to use for OWNERS and OWNERS_ALIASES for a repo.
+func (c *Configuration) OwnersFilenames(org, repo string) ownersconfig.Filenames {
+	full := fmt.Sprintf("%s/%s", org, repo)
+	if config, configured := c.Owners.Filenames[full]; configured {
+		return config
+	}
+	return ownersconfig.Filenames{
+		Owners:        ownersconfig.DefaultOwnersFile,
+		OwnersAliases: ownersconfig.DefaultOwnersAliasesFile,
+	}
 }
 
 // MDYAMLEnabled returns a boolean denoting if the passed repo supports YAML OWNERS config headers
@@ -181,12 +225,6 @@ func (c *Configuration) SkipCollaborators(org, repo string) bool {
 		}
 	}
 	return false
-}
-
-// RequireSIG specifies configuration for the require-sig plugin.
-type RequireSIG struct {
-	// GroupListURL is the URL where a list of the available SIGs can be found.
-	GroupListURL string `json:"group_list_url,omitempty"`
 }
 
 // Retitle specifies configuration for the retitle plugin.
@@ -232,6 +270,11 @@ type Size struct {
 type Blockade struct {
 	// Repos are either of the form org/repos or just org.
 	Repos []string `json:"repos,omitempty"`
+	// BranchRegexp is the regular expression for branches that the the blockade applies to.
+	// If BranchRegexp is not specified, the blockade applies to all branches by default.
+	// Compiles into BranchRe during config load.
+	BranchRegexp *string        `json:"branchregexp,omitempty"`
+	BranchRe     *regexp.Regexp `json:"-"`
 	// BlockRegexps are regular expressions matching the file paths to block.
 	BlockRegexps []string `json:"blockregexps,omitempty"`
 	// ExceptionRegexps are regular expressions matching the file paths that are exceptions to the BlockRegexps.
@@ -304,6 +347,14 @@ type Lgtm struct {
 	// StickyLgtmTeam specifies the GitHub team whose members are trusted with sticky LGTM,
 	// which eliminates the need to re-lgtm minor fixes/updates.
 	StickyLgtmTeam string `json:"trusted_team_for_sticky_lgtm,omitempty"`
+}
+
+// Jira holds the config for the jira plugin.
+type Jira struct {
+	// DisabledJiraProjects are projects for which we will never try to create a link,
+	// for example including `enterprise` here would disable linking for all issues
+	// that start with `enterprise-` like `enterprise-4.` Matching is case-insenitive.
+	DisabledJiraProjects []string `json:"disabled_jira_projects,omitempty"`
 }
 
 // Cat contains the configuration for the cat plugin.
@@ -391,7 +442,9 @@ type ConfigMapSpec struct {
 	// Name of ConfigMap
 	Name string `json:"name"`
 	// Key is the key in the ConfigMap to update with the file contents.
-	// If no explicit key is given, the basename of the file will be used.
+	// If no explicit key is given, the basename of the file will be used unless
+	// use_full_path_as_key: true is set, in which case the full filepath relative
+	// to the repository root will be used, replacing slashes with dashes.
 	Key string `json:"key,omitempty"`
 	// GZIP toggles whether the key's data should be GZIP'd before being stored
 	// If set to false and the global GZIP option is enabled, this file will
@@ -402,6 +455,10 @@ type ConfigMapSpec struct {
 	Clusters map[string][]string `json:"clusters"`
 	// ClusterGroup is a list of named cluster_groups to target. Mutually exclusive with clusters.
 	ClusterGroups []string `json:"cluster_groups,omitempty"`
+	// UseFullPathAsKey controls if the full path of the original file relative to the
+	// repository root should be used as the configmap key. Slashes will be replaced by
+	// dashes. Using this avoids the need for unique file names in the original repo.
+	UseFullPathAsKey bool `json:"use_full_path_as_key,omitempty"`
 }
 
 // A ClusterGroup is a list of clusters with namespaces
@@ -535,18 +592,14 @@ type ManagedColumn struct {
 
 // MergeWarning is a config for the slackevents plugin's manual merge warnings.
 // If a PR is pushed to any of the repos listed in the config then send messages
-// to the all the slack channels listed if pusher is NOT in the whitelist.
+// to the all the slack channels listed if pusher is NOT in the allowlist.
 type MergeWarning struct {
 	// Repos is either of the form org/repos or just org.
 	Repos []string `json:"repos,omitempty"`
 	// List of channels on which a event is published.
 	Channels []string `json:"channels,omitempty"`
-	// Deprecated: Use ExemptUsers instead.
-	WhiteList []string `json:"whitelist,omitempty"`
 	// A slack event is published if the user is not part of the ExemptUsers.
 	ExemptUsers []string `json:"exempt_users,omitempty"`
-	// Deprecated: Use ExemptBranches instead.
-	BranchWhiteList map[string][]string `json:"branch_whitelist,omitempty"`
 	// A slack event is published if the user is not on the exempt branches.
 	ExemptBranches map[string][]string `json:"exempt_branches,omitempty"`
 }
@@ -784,11 +837,39 @@ func (c *Configuration) DcoFor(org, repo string) *Dco {
 	return &Dco{}
 }
 
+func OldToNewPlugins(oldPlugins map[string][]string) Plugins {
+	newPlugins := make(Plugins)
+	for repo, plugins := range oldPlugins {
+		newPlugins[repo] = OrgPlugins{
+			Plugins: plugins,
+		}
+	}
+	return newPlugins
+}
+
+type pluginsWithoutUnmarshaler Plugins
+
+var warnTriggerDeprecatedConfig time.Time
+
+func (p *Plugins) UnmarshalJSON(d []byte) error {
+	var oldPlugins map[string][]string
+	if err := yaml.Unmarshal(d, &oldPlugins); err == nil {
+		logrusutil.ThrottledWarnf(&warnTriggerDeprecatedConfig, time.Hour, "plugins declaration uses a deprecated config style, see https://github.com/kubernetes/test-infra/issues/20631#issuecomment-787693609 for a migration guide")
+		*p = OldToNewPlugins(oldPlugins)
+		return nil
+	}
+	var target pluginsWithoutUnmarshaler
+	err := yaml.Unmarshal(d, &target)
+	*p = Plugins(target)
+	return err
+}
+
 // EnabledReposForPlugin returns the orgs and repos that have enabled the passed plugin.
-func (c *Configuration) EnabledReposForPlugin(plugin string) (orgs, repos []string) {
+func (c *Configuration) EnabledReposForPlugin(plugin string) (orgs, repos []string, orgExceptions map[string]sets.String) {
+	orgExceptions = make(map[string]sets.String)
 	for repo, plugins := range c.Plugins {
 		found := false
-		for _, candidate := range plugins {
+		for _, candidate := range plugins.Plugins {
 			if candidate == plugin {
 				found = true
 				break
@@ -799,8 +880,17 @@ func (c *Configuration) EnabledReposForPlugin(plugin string) (orgs, repos []stri
 				repos = append(repos, repo)
 			} else {
 				orgs = append(orgs, repo)
+				orgExceptions[repo] = sets.NewString()
+				for _, excludedRepo := range plugins.ExcludedRepos {
+					orgExceptions[repo].Insert(fmt.Sprintf("%s/%s", repo, excludedRepo))
+				}
 			}
 		}
+	}
+	// <plugin> plugin might be declared in both org and org/repo
+	// in that case, remove repo from org's orgExceptions despite the excluded_repo in org
+	for _, repo := range repos {
+		orgExceptions[strings.Split(repo, "/")[0]].Delete(repo)
 	}
 	return
 }
@@ -849,6 +939,8 @@ func (cu *ConfigUpdater) SetDefaults() {
 }
 
 func (c *Configuration) setDefaults() {
+	c.Help.setDefaults()
+
 	c.ConfigUpdater.SetDefaults()
 
 	for repo, plugins := range c.ExternalPlugins {
@@ -869,8 +961,12 @@ func (c *Configuration) setDefaults() {
 	if c.SigMention.Regexp == "" {
 		c.SigMention.Regexp = `(?m)@kubernetes/sig-([\w-]*)-(misc|test-failures|bugs|feature-requests|proposals|pr-reviews|api-reviews)`
 	}
-	if c.Owners.LabelsBlackList == nil {
-		c.Owners.LabelsBlackList = []string{labels.Approved, labels.LGTM}
+	if c.Owners.LabelsDenyList == nil {
+		if c.Owners.LabelsBlackList != nil {
+			c.Owners.LabelsDenyList = c.Owners.LabelsBlackList
+		} else {
+			c.Owners.LabelsDenyList = []string{labels.Approved, labels.LGTM}
+		}
 	}
 	for _, milestone := range c.RepoMilestone {
 		if milestone.MaintainersFriendlyName == "" {
@@ -894,12 +990,12 @@ func (c *Configuration) setDefaults() {
 // validatePluginsDupes will return an error if there are duplicated plugins.
 // It is sometimes a sign of misconfiguration and is always useless for a
 // plugin to be specified at both the org and repo levels.
-func validatePluginsDupes(plugins map[string][]string) error {
+func validatePluginsDupes(plugins Plugins) error {
 	var errors []error
 	for repo, repoConfig := range plugins {
 		if strings.Contains(repo, "/") {
 			org := strings.Split(repo, "/")[0]
-			if dupes := findDuplicatedPluginConfig(repoConfig, plugins[org]); len(dupes) > 0 {
+			if dupes := findDuplicatedPluginConfig(repoConfig.Plugins, plugins[org].Plugins); len(dupes) > 0 {
 				errors = append(errors, fmt.Errorf("plugins %v are duplicated for %s and %s", dupes, repo, org))
 			}
 		}
@@ -912,7 +1008,7 @@ func validatePluginsDupes(plugins map[string][]string) error {
 func (c *Configuration) ValidatePluginsUnknown() error {
 	var errors []error
 	for _, configuration := range c.Plugins {
-		for _, plugin := range configuration {
+		for _, plugin := range configuration.Plugins {
 			if _, ok := pluginHelp[plugin]; !ok {
 				errors = append(errors, fmt.Errorf("unknown plugin: %s", plugin))
 			}
@@ -1075,34 +1171,6 @@ func validateTrigger(triggers []Trigger) error {
 	return nil
 }
 
-var (
-	warnSlackMergeWarningWhiteList       time.Time
-	warnSlackMergeWarningBranchWhiteList time.Time
-)
-
-func validateSlack(slack Slack) error {
-	for i := range slack.MergeWarnings {
-		if len(slack.MergeWarnings[i].WhiteList) > 0 {
-			if len(slack.MergeWarnings[i].ExemptUsers) > 0 {
-				return errors.New("invalid Slack merge warning configuration: both whitelist (deprecated) and exempt_users are set.")
-			}
-
-			logrusutil.ThrottledWarnf(&warnSlackMergeWarningWhiteList, 5*time.Minute, "whitelist field in Slack merge warning is deprecated and has been renamed to exempt_users. Please update your configuration.")
-			slack.MergeWarnings[i].ExemptUsers = slack.MergeWarnings[i].WhiteList
-		}
-
-		if len(slack.MergeWarnings[i].BranchWhiteList) > 0 {
-			if len(slack.MergeWarnings[i].ExemptBranches) > 0 {
-				return errors.New("invalid Slack merge warning configuration: both branch_whitelist (deprecated) and exempt_branches are set.")
-			}
-
-			logrusutil.ThrottledWarnf(&warnSlackMergeWarningBranchWhiteList, 5*time.Minute, "branch_whitelist field in Slack merge warning is deprecated and has been renamed to exempt_branches. Please update your configuration.")
-			slack.MergeWarnings[i].ExemptBranches = slack.MergeWarnings[i].BranchWhiteList
-		}
-	}
-	return nil
-}
-
 func compileRegexpsAndDurations(pc *Configuration) error {
 	cRe, err := regexp.Compile(pc.SigMention.Regexp)
 	if err != nil {
@@ -1115,6 +1183,17 @@ func compileRegexpsAndDurations(pc *Configuration) error {
 		return err
 	}
 	pc.CherryPickUnapproved.BranchRe = branchRe
+
+	for i := range pc.Blockades {
+		if pc.Blockades[i].BranchRegexp == nil {
+			continue
+		}
+		branchRe, err := regexp.Compile(*pc.Blockades[i].BranchRegexp)
+		if err != nil {
+			return fmt.Errorf("failed to compile blockade branchregexp: %q, error: %v", *pc.Blockades[i].BranchRegexp, err)
+		}
+		pc.Blockades[i].BranchRe = branchRe
+	}
 
 	commentRe, err := regexp.Compile(pc.Heart.CommentRegexp)
 	if err != nil {
@@ -1145,6 +1224,9 @@ func (c *Configuration) Validate() error {
 		logrus.Warn("no plugins specified-- check syntax?")
 	}
 
+	if c.Owners.LabelsBlackList != nil && c.Owners.LabelsDenyList != nil {
+		return errors.New("labels_blacklist and labels_denylist cannot be both supplied")
+	}
 	// Defaulting should run before validation.
 	c.setDefaults()
 	// Regexp compilation should run after defaulting, but before validation.
@@ -1174,9 +1256,6 @@ func (c *Configuration) Validate() error {
 		return err
 	}
 	if err := validateTrigger(c.Triggers); err != nil {
-		return err
-	}
-	if err := validateSlack(c.Slack); err != nil {
 		return err
 	}
 
@@ -1688,4 +1767,58 @@ type Override struct {
 	// AllowedGitHubTeams is a map of repositories (eg "k/k") to list of GitHub team slugs,
 	// members of which are allowed to override contexts
 	AllowedGitHubTeams map[string][]string `json:"allowed_github_teams,omitempty"`
+}
+
+func (c *Configuration) mergeFrom(other *Configuration) error {
+	var errs []error
+	if diff := cmp.Diff(other, &Configuration{Plugins: other.Plugins}); diff != "" {
+		errs = append(errs, fmt.Errorf("supplemental plugin configuration has config that doesn't support merging: %s", diff))
+	}
+
+	if c.Plugins == nil {
+		c.Plugins = Plugins{}
+	}
+	if err := c.Plugins.mergeFrom(&other.Plugins); err != nil {
+		errs = append(errs, fmt.Errorf("failed to merge .plugins from supplemental config: %w", err))
+	}
+
+	return utilerrors.NewAggregate(errs)
+}
+
+func (p *Plugins) mergeFrom(other *Plugins) error {
+	if other == nil {
+		return nil
+	}
+	if len(*p) == 0 {
+		*p = *other
+		return nil
+	}
+
+	var errs []error
+	for orgOrRepo, config := range *other {
+		if _, ok := (*p)[orgOrRepo]; ok {
+			errs = append(errs, fmt.Errorf("found duplicate config for plugins.%s", orgOrRepo))
+			continue
+		}
+		(*p)[orgOrRepo] = config
+	}
+
+	return utilerrors.NewAggregate(errs)
+}
+
+func (c *Configuration) HasConfigFor() (global bool, orgs sets.String, repos sets.String) {
+	if !reflect.DeepEqual(c, &Configuration{Plugins: c.Plugins}) {
+		global = true
+	}
+	orgs = sets.String{}
+	repos = sets.String{}
+	for orgOrRepo := range c.Plugins {
+		if strings.Contains(orgOrRepo, "/") {
+			repos.Insert(orgOrRepo)
+		} else {
+			orgs.Insert(orgOrRepo)
+		}
+	}
+
+	return global, orgs, repos
 }

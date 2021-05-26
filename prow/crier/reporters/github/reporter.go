@@ -19,6 +19,7 @@ limitations under the License.
 package github
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -118,7 +119,7 @@ func (c *Client) GetName() string {
 }
 
 // ShouldReport returns if this prowjob should be reported by the github reporter
-func (c *Client) ShouldReport(_ *logrus.Entry, pj *v1.ProwJob) bool {
+func (c *Client) ShouldReport(_ context.Context, _ *logrus.Entry, pj *v1.ProwJob) bool {
 
 	switch {
 	case pj.Labels[client.GerritReportLabel] != "":
@@ -133,7 +134,7 @@ func (c *Client) ShouldReport(_ *logrus.Entry, pj *v1.ProwJob) bool {
 }
 
 // Report will report via reportlib
-func (c *Client) Report(log *logrus.Entry, pj *v1.ProwJob) ([]*v1.ProwJob, *reconcile.Result, error) {
+func (c *Client) Report(_ context.Context, log *logrus.Entry, pj *v1.ProwJob) ([]*v1.ProwJob, *reconcile.Result, error) {
 
 	// The github comment create/update/delete done for presubmits
 	// needs pr-level locking to avoid racing when reporting multiple
@@ -155,7 +156,7 @@ func (c *Client) Report(log *logrus.Entry, pj *v1.ProwJob) ([]*v1.ProwJob, *reco
 			// This is completely unrecoverable, so just swallow the error to make sure we wont retry, even when crier gets restarted.
 			log.WithError(err).Debug("Encountered an error, skipping retries")
 			err = nil
-		} else if strings.Contains(err.Error(), "\"message\":\"Not Found\"") {
+		} else if strings.Contains(err.Error(), "\"message\":\"Not Found\"") || strings.Contains(err.Error(), "\"message\":\"No commit found for SHA:") {
 			// "message":"Not Found" error occurs when someone force push, which is not a crier error
 			log.WithError(err).Debug("Could not find PR commit, skipping retries")
 			err = nil

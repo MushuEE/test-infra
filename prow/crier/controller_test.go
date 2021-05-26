@@ -26,6 +26,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/sirupsen/logrus"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrlruntime "sigs.k8s.io/controller-runtime"
 	ctrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -47,7 +48,7 @@ type fakeReporter struct {
 	err              error
 }
 
-func (f *fakeReporter) Report(_ *logrus.Entry, pj *prowv1.ProwJob) ([]*prowv1.ProwJob, *reconcile.Result, error) {
+func (f *fakeReporter) Report(_ context.Context, _ *logrus.Entry, pj *prowv1.ProwJob) ([]*prowv1.ProwJob, *reconcile.Result, error) {
 	f.reported = append(f.reported, pj.Spec.Job)
 	return []*prowv1.ProwJob{pj}, f.res, f.err
 }
@@ -56,19 +57,20 @@ func (f *fakeReporter) GetName() string {
 	return reporterName
 }
 
-func (f *fakeReporter) ShouldReport(_ *logrus.Entry, pj *prowv1.ProwJob) bool {
+func (f *fakeReporter) ShouldReport(_ context.Context, _ *logrus.Entry, pj *prowv1.ProwJob) bool {
 	return f.shouldReportFunc(pj)
 }
 
-func TestController_Run(t *testing.T) {
+func TestReconcile(t *testing.T) {
 
 	const toReconcile = "foo"
 	tests := []struct {
-		name         string
-		job          *prowv1.ProwJob
-		shouldReport bool
-		result       *reconcile.Result
-		reportErr    error
+		name              string
+		job               *prowv1.ProwJob
+		enablementChecker func(org, repo string) bool
+		shouldReport      bool
+		result            *reconcile.Result
+		reportErr         error
 
 		expectResult  reconcile.Result
 		expectReport  bool
@@ -89,6 +91,75 @@ func TestController_Run(t *testing.T) {
 			shouldReport: true,
 			expectReport: true,
 			expectPatch:  true,
+		},
+		{
+			name: "reports/patches job whose org/repo in refs enabled",
+			job: &prowv1.ProwJob{
+				Spec: prowv1.ProwJobSpec{
+					Job:    "foo",
+					Report: true,
+					Refs:   &prowv1.Refs{Org: "org", Repo: "repo"},
+				},
+				Status: prowv1.ProwJobStatus{
+					State: prowv1.TriggeredState,
+				},
+			},
+			enablementChecker: func(org, repo string) bool { return org == "org" && repo == "repo" },
+			shouldReport:      true,
+			expectReport:      true,
+			expectPatch:       true,
+		},
+		{
+			name: "reports/patches job whose org/repo in extra refs enabled",
+			job: &prowv1.ProwJob{
+				Spec: prowv1.ProwJobSpec{
+					Job:       "foo",
+					Report:    true,
+					ExtraRefs: []prowv1.Refs{{Org: "org", Repo: "repo"}},
+				},
+				Status: prowv1.ProwJobStatus{
+					State: prowv1.TriggeredState,
+				},
+			},
+			enablementChecker: func(org, repo string) bool { return org == "org" && repo == "repo" },
+			shouldReport:      true,
+			expectReport:      true,
+			expectPatch:       true,
+		},
+		{
+			name: "reports/patches job whose org/repo in extra refs and refs have conflicting settings",
+			job: &prowv1.ProwJob{
+				Spec: prowv1.ProwJobSpec{
+					Job:       "foo",
+					Report:    true,
+					Refs:      &prowv1.Refs{Org: "org", Repo: "repo"},
+					ExtraRefs: []prowv1.Refs{{Org: "other-org", Repo: "other-repo"}},
+				},
+				Status: prowv1.ProwJobStatus{
+					State: prowv1.TriggeredState,
+				},
+			},
+			enablementChecker: func(org, repo string) bool { return org == "org" && repo == "repo" },
+			shouldReport:      true,
+			expectReport:      true,
+			expectPatch:       true,
+		},
+		{
+			name: "doesn't reports/patches job whose org/repo is not enabled",
+			job: &prowv1.ProwJob{
+				Spec: prowv1.ProwJobSpec{
+					Job:    "foo",
+					Report: true,
+					Refs:   &prowv1.Refs{Org: "org", Repo: "repo"},
+				},
+				Status: prowv1.ProwJobStatus{
+					State: prowv1.TriggeredState,
+				},
+			},
+			enablementChecker: func(_, _ string) bool { return false },
+			shouldReport:      false,
+			expectReport:      false,
+			expectPatch:       false,
 		},
 		{
 			name: "doesn't report when it shouldn't",
@@ -188,15 +259,16 @@ func TestController_Run(t *testing.T) {
 				err: test.reportErr,
 			}
 
-			var prowjobs []ctrlruntimeclient.Object
+			var prowjobs []runtime.Object
 			if test.job != nil {
 				prowjobs = append(prowjobs, test.job)
 				test.job.Name = toReconcile
 			}
 			cs := &patchTrackingClient{Client: fakectrlruntimeclient.NewFakeClient(prowjobs...)}
 			r := &reconciler{
-				pjclientset: cs,
-				reporter:    &rp,
+				pjclientset:       cs,
+				reporter:          &rp,
+				enablementChecker: test.enablementChecker,
 			}
 
 			result, err := r.Reconcile(context.Background(), ctrlruntime.Request{NamespacedName: types.NamespacedName{Name: toReconcile}})

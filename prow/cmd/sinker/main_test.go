@@ -29,6 +29,7 @@ import (
 	"github.com/sirupsen/logrus"
 	corev1api "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	ctrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -37,6 +38,7 @@ import (
 	prowv1 "k8s.io/test-infra/prow/apis/prowjobs/v1"
 	"k8s.io/test-infra/prow/config"
 	"k8s.io/test-infra/prow/flagutil"
+	configflagutil "k8s.io/test-infra/prow/flagutil/config"
 	"k8s.io/test-infra/prow/kube"
 )
 
@@ -101,7 +103,7 @@ func (unreachableCluster) Patch(_ context.Context, _ ctrlruntimeclient.Object, _
 
 func TestClean(t *testing.T) {
 
-	pods := []ctrlruntimeclient.Object{
+	pods := []runtime.Object{
 		&corev1api.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "job-running-pod-failed",
@@ -486,7 +488,7 @@ func TestClean(t *testing.T) {
 		completed := metav1.NewTime(time.Now().Add(d))
 		return &completed
 	}
-	prowJobs := []ctrlruntimeclient.Object{
+	prowJobs := []runtime.Object{
 		&prowv1.ProwJob{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "job-complete",
@@ -695,7 +697,7 @@ func TestClean(t *testing.T) {
 		"oldest-periodic",
 		"old-failed-trusted",
 	)
-	podsTrusted := []ctrlruntimeclient.Object{
+	podsTrusted := []runtime.Object{
 		&corev1api.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "old-failed-trusted",
@@ -751,7 +753,7 @@ func TestClean(t *testing.T) {
 
 func TestNotClean(t *testing.T) {
 
-	pods := []ctrlruntimeclient.Object{
+	pods := []runtime.Object{
 		&corev1api.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "job-complete-pod-succeeded",
@@ -767,7 +769,7 @@ func TestNotClean(t *testing.T) {
 			},
 		},
 	}
-	podsExcluded := []ctrlruntimeclient.Object{
+	podsExcluded := []runtime.Object{
 		&corev1api.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "job-complete-pod-succeeded-on-excluded-cluster",
@@ -787,7 +789,7 @@ func TestNotClean(t *testing.T) {
 		completed := metav1.NewTime(time.Now().Add(d))
 		return &completed
 	}
-	prowJobs := []ctrlruntimeclient.Object{
+	prowJobs := []runtime.Object{
 		&prowv1.ProwJob{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "job-complete",
@@ -863,18 +865,15 @@ func TestFlags(t *testing.T) {
 				"--config-path": "/random/path",
 			},
 			expected: func(o *options) {
-				o.configPath = "/random/path"
+				o.config.ConfigPath = "/random/path"
 			},
 		},
 		{
-			name: "expicitly set --dry-run=false",
+			name: "explicitly set --dry-run=false",
 			args: map[string]string{
 				"--dry-run": "false",
 			},
 			expected: func(o *options) {
-				o.dryRun = flagutil.Bool{
-					Explicit: true,
-				}
 			},
 		},
 		{
@@ -892,18 +891,19 @@ func TestFlags(t *testing.T) {
 				"--deck-url": "http://whatever",
 			},
 			expected: func(o *options) {
-				o.dryRun = flagutil.Bool{
-					Value:    true,
-					Explicit: true,
-				}
+				o.dryRun = true
 				o.kubernetes.DeckURI = "http://whatever"
 			},
 		},
 		{
-			name: "dry run defaults to false", // TODO(fejta): change to true in April
-			del:  sets.NewString("--dry-run"),
+			name: "dry run defaults to true",
+			args: map[string]string{
+				"--deck-url": "http://whatever",
+			},
+			del: sets.NewString("--dry-run"),
 			expected: func(o *options) {
-				o.dryRun = flagutil.Bool{}
+				o.dryRun = true
+				o.kubernetes.DeckURI = "http://whatever"
 			},
 		},
 	}
@@ -911,14 +911,14 @@ func TestFlags(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			expected := &options{
-				configPath: "yo",
-				dryRun: flagutil.Bool{
-					Explicit: true,
+				config: configflagutil.ConfigOptions{
+					ConfigPathFlagName:                    "config-path",
+					JobConfigPathFlagName:                 "job-config-path",
+					ConfigPath:                            "yo",
+					SupplementalProwConfigsFileNameSuffix: "_prowconfig.yaml",
 				},
-				instrumentationOptions: flagutil.InstrumentationOptions{
-					MetricsPort: flagutil.DefaultMetricsPort,
-					PProfPort:   flagutil.DefaultPProfPort,
-				},
+				dryRun:                 false,
+				instrumentationOptions: flagutil.DefaultInstrumentationOptions(),
 			}
 			if tc.expected != nil {
 				tc.expected(expected)
@@ -949,7 +949,7 @@ func TestFlags(t *testing.T) {
 			case tc.err:
 				t.Errorf("failed to receive expected error")
 			case !reflect.DeepEqual(*expected, actual):
-				t.Errorf("%#v != expected %#v", actual, *expected)
+				t.Errorf("\n%#v\n != expected \n%#v\n", actual, *expected)
 			}
 		})
 	}

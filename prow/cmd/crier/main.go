@@ -23,6 +23,7 @@ import (
 	"os"
 
 	"github.com/sirupsen/logrus"
+	"k8s.io/test-infra/prow/pjutil/pprof"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	prowapi "k8s.io/test-infra/prow/apis/prowjobs/v1"
@@ -36,22 +37,22 @@ import (
 	pubsubreporter "k8s.io/test-infra/prow/crier/reporters/pubsub"
 	slackreporter "k8s.io/test-infra/prow/crier/reporters/slack"
 	prowflagutil "k8s.io/test-infra/prow/flagutil"
+	configflagutil "k8s.io/test-infra/prow/flagutil/config"
 	gerritclient "k8s.io/test-infra/prow/gerrit/client"
 	"k8s.io/test-infra/prow/interrupts"
 	"k8s.io/test-infra/prow/io"
 	"k8s.io/test-infra/prow/logrusutil"
 	"k8s.io/test-infra/prow/metrics"
-	"k8s.io/test-infra/prow/pjutil"
 )
 
 type options struct {
-	client         prowflagutil.KubernetesOptions
-	cookiefilePath string
-	gerritProjects gerritclient.ProjectsFlag
-	github         prowflagutil.GitHubOptions
+	client           prowflagutil.KubernetesOptions
+	cookiefilePath   string
+	gerritProjects   gerritclient.ProjectsFlag
+	github           prowflagutil.GitHubOptions
+	githubEnablement prowflagutil.GitHubEnablementOptions
 
-	configPath    string
-	jobConfigPath string
+	config configflagutil.ConfigOptions
 
 	gerritWorkers         int
 	pubsubWorkers         int
@@ -75,9 +76,6 @@ type options struct {
 }
 
 func (o *options) validate() error {
-	if o.configPath == "" {
-		return errors.New("required flag --config-path was unset")
-	}
 
 	// TODO(krzyzacy): gerrit && github report are actually stateful..
 	// Need a better design to re-enable parallel reporting
@@ -135,8 +133,10 @@ func (o *options) validate() error {
 		o.k8sBlobStorageWorkers = o.k8sGCSWorkers
 	}
 
-	if err := o.client.Validate(o.dryrun); err != nil {
-		return err
+	for _, opt := range []interface{ Validate(bool) error }{&o.client, &o.githubEnablement, &o.config} {
+		if err := opt.Validate(o.dryrun); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -160,16 +160,15 @@ func (o *options) parseArgs(fs *flag.FlagSet, args []string) error {
 	fs.StringVar(&o.slackTokenFile, "slack-token-file", "", "Path to a Slack token file")
 	fs.StringVar(&o.reportAgent, "report-agent", "", "Only report specified agent - empty means report to all agents (effective for github and Slack only)")
 
-	fs.StringVar(&o.configPath, "config-path", "", "Path to config.yaml.")
-	fs.StringVar(&o.jobConfigPath, "job-config-path", "", "Path to prow job configs.")
-
 	// TODO(krzyzacy): implement dryrun for gerrit/pubsub
 	fs.BoolVar(&o.dryrun, "dry-run", false, "Run in dry-run mode, not doing actual report (effective for github and Slack only)")
 
+	o.config.AddFlags(fs)
 	o.github.AddFlags(fs)
 	o.client.AddFlags(fs)
 	o.storage.AddFlags(fs)
 	o.instrumentationOptions.AddFlags(fs)
+	o.githubEnablement.AddFlags(fs)
 
 	fs.Parse(args)
 
@@ -193,16 +192,16 @@ func main() {
 
 	defer interrupts.WaitForGracefulShutdown()
 
-	pjutil.ServePProf(o.instrumentationOptions.PProfPort)
+	pprof.Instrument(o.instrumentationOptions)
 
-	configAgent := &config.Agent{}
-	if err := configAgent.Start(o.configPath, o.jobConfigPath); err != nil {
+	configAgent, err := o.config.ConfigAgent()
+	if err != nil {
 		logrus.WithError(err).Fatal("Error starting config agent.")
 	}
 	cfg := configAgent.Config
 
 	secretAgent := &secret.Agent{}
-	if err := secretAgent.Start([]string{}); err != nil {
+	if err := secretAgent.Start(nil); err != nil {
 		logrus.WithError(err).Fatal("unable to start secret agent")
 	}
 
@@ -218,9 +217,18 @@ func main() {
 		logrus.WithError(err).Fatal("failed to create manager")
 	}
 
+	// The watch apimachinery doesn't support restarts, so just exit the binary if a kubeconfig changes
+	// to make the kubelet restart us.
+	if err := o.client.AddKubeconfigChangeCallback(func() {
+		logrus.Info("Kubeconfig changed, exiting to trigger a restart")
+		interrupts.Terminate()
+	}); err != nil {
+		logrus.WithError(err).Fatal("Failed to register kubeconfig change callback")
+	}
+
 	var hasReporter bool
 	if o.slackWorkers > 0 {
-		if cfg().SlackReporter == nil && cfg().SlackReporterConfigs == nil {
+		if cfg().SlackReporterConfigs == nil {
 			logrus.Fatal("slackreporter is enabled but has no config")
 		}
 		slackConfig := func(refs *prowapi.Refs) config.SlackReporter {
@@ -231,7 +239,7 @@ func main() {
 		}
 		hasReporter = true
 		slackReporter := slackreporter.New(slackConfig, o.dryrun, secretAgent.GetTokenGenerator(o.slackTokenFile))
-		if err := crier.New(mgr, slackReporter, o.slackWorkers); err != nil {
+		if err := crier.New(mgr, slackReporter, o.slackWorkers, o.githubEnablement.EnablementChecker()); err != nil {
 			logrus.WithError(err).Fatal("failed to construct slack reporter controller")
 		}
 	}
@@ -243,14 +251,14 @@ func main() {
 		}
 
 		hasReporter = true
-		if err := crier.New(mgr, gerritReporter, o.gerritWorkers); err != nil {
+		if err := crier.New(mgr, gerritReporter, o.gerritWorkers, o.githubEnablement.EnablementChecker()); err != nil {
 			logrus.WithError(err).Fatal("failed to construct gerrit reporter controller")
 		}
 	}
 
 	if o.pubsubWorkers > 0 {
 		hasReporter = true
-		if err := crier.New(mgr, pubsubreporter.NewReporter(cfg), o.pubsubWorkers); err != nil {
+		if err := crier.New(mgr, pubsubreporter.NewReporter(cfg), o.pubsubWorkers, o.githubEnablement.EnablementChecker()); err != nil {
 			logrus.WithError(err).Fatal("failed to construct pubsub reporter controller")
 		}
 	}
@@ -269,7 +277,7 @@ func main() {
 
 		hasReporter = true
 		githubReporter := githubreporter.NewReporter(githubClient, cfg, prowapi.ProwJobAgent(o.reportAgent))
-		if err := crier.New(mgr, githubReporter, o.githubWorkers); err != nil {
+		if err := crier.New(mgr, githubReporter, o.githubWorkers, o.githubEnablement.EnablementChecker()); err != nil {
 			logrus.WithError(err).Fatal("failed to construct github reporter controller")
 		}
 	}
@@ -281,7 +289,7 @@ func main() {
 		}
 
 		hasReporter = true
-		if err := crier.New(mgr, gcsreporter.New(cfg, opener, o.dryrun), o.blobStorageWorkers); err != nil {
+		if err := crier.New(mgr, gcsreporter.New(cfg, opener, o.dryrun), o.blobStorageWorkers, o.githubEnablement.EnablementChecker()); err != nil {
 			logrus.WithError(err).Fatal("failed to construct gcsreporter controller")
 		}
 
@@ -292,7 +300,7 @@ func main() {
 			}
 
 			k8sGcsReporter := k8sgcsreporter.New(cfg, opener, coreClients, float32(o.k8sReportFraction), o.dryrun)
-			if err := crier.New(mgr, k8sGcsReporter, o.k8sBlobStorageWorkers); err != nil {
+			if err := crier.New(mgr, k8sGcsReporter, o.k8sBlobStorageWorkers, o.githubEnablement.EnablementChecker()); err != nil {
 				logrus.WithError(err).Fatal("failed to construct k8sgcsreporter controller")
 			}
 		}

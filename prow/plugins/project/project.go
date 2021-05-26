@@ -54,7 +54,7 @@ var (
 )
 
 type githubClient interface {
-	BotName() (string, error)
+	BotUserChecker() (func(candidate string) bool, error)
 	CreateComment(owner, repo string, number int, comment string) error
 	ListTeamMembers(org string, id int, role string) ([]github.TeamMember, error)
 	GetRepos(org string, isUser bool) ([]github.Repo, error)
@@ -187,11 +187,11 @@ func handle(gc githubClient, log *logrus.Entry, e *github.GenericCommentEvent, p
 	}
 
 	// Only handle comments that don't come from the bot
-	botName, err := gc.BotName()
+	botUserChecker, err := gc.BotUserChecker()
 	if err != nil {
 		return err
 	}
-	if e.User.Login == botName {
+	if botUserChecker(e.User.Login) {
 		return nil
 	}
 
@@ -231,10 +231,9 @@ func handle(gc githubClient, log *logrus.Entry, e *github.GenericCommentEvent, p
 	}
 	updateProjectNameToIDMap(projects)
 
-	var projectID int
 	var ok bool
 	// Only fetch the other repos in the org if we did not find the project in the same repo as the issue/pr
-	if projectID, ok = projectNameToIDMap[proposedProject]; !ok {
+	if _, ok = projectNameToIDMap[proposedProject]; !ok {
 		repos, err := gc.GetRepos(org, false)
 		if err != nil {
 			return err
@@ -250,6 +249,8 @@ func handle(gc githubClient, log *logrus.Entry, e *github.GenericCommentEvent, p
 	}
 	// Only fetch org projects if we can't find the proposed project / project to clear in the repo projects
 	updateProjectNameToIDMap(projects)
+
+	var projectID int
 	if projectID, ok = projectNameToIDMap[proposedProject]; !ok {
 		// Get all projects for this org
 		orgProjects, err := gc.GetOrgProjects(org)

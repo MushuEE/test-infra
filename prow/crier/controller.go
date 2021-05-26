@@ -40,19 +40,20 @@ type ReportClient interface {
 	// Report reports a Prowjob. The provided logger is already populated with the
 	// prowjob name and the reporter name.
 	// If a reporter wants to defer reporting, it can return a reconcile.Result with a RequeueAfter
-	Report(log *logrus.Entry, pj *prowv1.ProwJob) ([]*prowv1.ProwJob, *reconcile.Result, error)
+	Report(ctx context.Context, log *logrus.Entry, pj *prowv1.ProwJob) ([]*prowv1.ProwJob, *reconcile.Result, error)
 	GetName() string
 	// ShouldReport determines if a ProwJob should be reported. The provided logger
 	// is already populated with the prowjob name and the reporter name.
-	ShouldReport(log *logrus.Entry, pj *prowv1.ProwJob) bool
+	ShouldReport(ctx context.Context, log *logrus.Entry, pj *prowv1.ProwJob) bool
 }
 
 // reconciler struct defines how a controller should encapsulate
 // logging, client connectivity, informing (list and watching)
 // queueing, and handling of resource changes
 type reconciler struct {
-	pjclientset ctrlruntimeclient.Client
-	reporter    ReportClient
+	pjclientset       ctrlruntimeclient.Client
+	reporter          ReportClient
+	enablementChecker func(org, repo string) bool
 }
 
 // New constructs a new instance of the crier reconciler.
@@ -60,6 +61,7 @@ func New(
 	mgr manager.Manager,
 	reporter ReportClient,
 	numWorkers int,
+	enablementChecker func(org, repo string) bool,
 ) error {
 	if err := builder.
 		ControllerManagedBy(mgr).
@@ -68,8 +70,9 @@ func New(
 		For(&prowv1.ProwJob{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: numWorkers}).
 		Complete(&reconciler{
-			pjclientset: mgr.GetClient(),
-			reporter:    reporter,
+			pjclientset:       mgr.GetClient(),
+			reporter:          reporter,
+			enablementChecker: enablementChecker,
 		}); err != nil {
 		return fmt.Errorf("failed to construct controller: %w", err)
 	}
@@ -94,7 +97,7 @@ func (r *reconciler) updateReportState(ctx context.Context, pj *prowv1.ProwJob, 
 	// that also does reporting dont trigger another report because our lister doesn't yet contain
 	// the updated Status
 	name := types.NamespacedName{Namespace: pj.Namespace, Name: pj.Name}
-	if err := wait.Poll(100*time.Millisecond, 3*time.Second, func() (bool, error) {
+	if err := wait.Poll(100*time.Millisecond, 10*time.Second, func() (bool, error) {
 		if err := r.pjclientset.Get(ctx, name, pj); err != nil {
 			return false, err
 		}
@@ -153,7 +156,12 @@ func (r *reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 }
 
 func (r *reconciler) reconcile(ctx context.Context, log *logrus.Entry, req reconcile.Request) (*reconcile.Result, error) {
-
+	// Limit reconciliation time to 30 minutes. This should more than enough time
+	// for any reasonable reporter. Most reporters should set a stricter timeout
+	// themselves. This mainly helps avoid leaking reconciliation threads that
+	// will never complete.
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	defer cancel()
 	var pj prowv1.ProwJob
 	if err := r.pjclientset.Get(ctx, req.NamespacedName, &pj); err != nil {
 		if errors.IsNotFound(err) {
@@ -164,9 +172,13 @@ func (r *reconciler) reconcile(ctx context.Context, log *logrus.Entry, req recon
 		return nil, fmt.Errorf("failed to get prowjob %s: %w", req.String(), err)
 	}
 
+	if !r.shouldHandle(&pj) {
+		return nil, nil
+	}
+
 	log = log.WithField("jobName", pj.Spec.Job)
 
-	if !pj.Spec.Report || !r.reporter.ShouldReport(log, &pj) {
+	if !pj.Spec.Report || !r.reporter.ShouldReport(ctx, log, &pj) {
 		return nil, nil
 	}
 
@@ -183,7 +195,7 @@ func (r *reconciler) reconcile(ctx context.Context, log *logrus.Entry, req recon
 
 	log = log.WithField("jobStatus", pj.Status.State)
 	log.Info("Will report state")
-	pjs, requeue, err := r.reporter.Report(log, &pj)
+	pjs, requeue, err := r.reporter.Report(ctx, log, &pj)
 	if err != nil {
 		log.WithError(err).Error("failed to report job")
 		return nil, fmt.Errorf("failed to report job: %w", err)
@@ -192,7 +204,7 @@ func (r *reconciler) reconcile(ctx context.Context, log *logrus.Entry, req recon
 		return requeue, nil
 	}
 
-	log.Info("Reported job(s), now will update pj(s)")
+	log.WithField("job-count", len(pjs)).Info("Reported job(s), now will update pj(s).")
 	for _, pjob := range pjs {
 		if err := r.updateReportStateWithRetries(ctx, pjob, log); err != nil {
 			log.WithError(err).Error("Failed to update report state on prowjob")
@@ -201,4 +213,27 @@ func (r *reconciler) reconcile(ctx context.Context, log *logrus.Entry, req recon
 	}
 
 	return nil, nil
+}
+
+func (r *reconciler) shouldHandle(pj *prowv1.ProwJob) bool {
+	refs := pj.Spec.ExtraRefs
+	if pj.Spec.Refs != nil {
+		refs = append(refs, *pj.Spec.Refs)
+	}
+	if len(refs) == 0 {
+		return true
+	}
+
+	// It is possible to have conflicting settings here, we choose
+	// to report if in doubt because reporting multiple times is
+	// better than not reporting at all.
+	var enabled bool
+	for _, ref := range refs {
+		if r.enablementChecker(ref.Org, ref.Repo) {
+			enabled = true
+			break
+		}
+	}
+
+	return enabled
 }

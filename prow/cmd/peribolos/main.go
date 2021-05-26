@@ -63,9 +63,12 @@ type options struct {
 	allowRepoArchival bool
 	allowRepoPublish  bool
 	github            flagutil.GitHubOptions
-	tokenBurst        int
-	tokensPerHour     int
-	logLevel          string
+
+	// TODO(petr-muller): Remove after August 2021, replaced by github.ThrottleHourlyTokens
+	tokenBurst    int
+	tokensPerHour int
+
+	logLevel string
 }
 
 func parseOptions() options {
@@ -84,8 +87,8 @@ func (o *options) parseArgs(flags *flag.FlagSet, args []string) error {
 	flags.Float64Var(&o.maximumDelta, "maximum-removal-delta", defaultDelta, "Fail if config removes more than this fraction of current members")
 	flags.StringVar(&o.config, "config-path", "", "Path to org config.yaml")
 	flags.BoolVar(&o.confirm, "confirm", false, "Mutate github if set")
-	flags.IntVar(&o.tokensPerHour, "tokens", defaultTokens, "Throttle hourly token consumption (0 to disable)")
-	flags.IntVar(&o.tokenBurst, "token-burst", defaultBurst, "Allow consuming a subset of hourly tokens in a short burst")
+	flags.IntVar(&o.tokensPerHour, "tokens", defaultTokens, "Throttle hourly token consumption (0 to disable) DEPRECATED: use --github-hourly-tokens")
+	flags.IntVar(&o.tokenBurst, "token-burst", defaultBurst, "Allow consuming a subset of hourly tokens in a short burst. DEPRECATED: use --github-allowed-burst")
 	flags.StringVar(&o.dump, "dump", "", "Output current config of this org if set")
 	flags.BoolVar(&o.dumpFull, "dump-full", false, "Output current config of the org as a valid input config file instead of a snippet")
 	flags.BoolVar(&o.ignoreSecretTeams, "ignore-secret-teams", false, "Do not dump or update secret teams if set")
@@ -98,15 +101,28 @@ func (o *options) parseArgs(flags *flag.FlagSet, args []string) error {
 	flags.BoolVar(&o.allowRepoArchival, "allow-repo-archival", false, "If set, archiving repos is allowed while updating repos")
 	flags.BoolVar(&o.allowRepoPublish, "allow-repo-publish", false, "If set, making private repos public is allowed while updating repos")
 	flags.StringVar(&o.logLevel, "log-level", logrus.InfoLevel.String(), fmt.Sprintf("Logging level, one of %v", logrus.AllLevels))
-	o.github.AddFlags(flags)
+	o.github.AddCustomizedFlags(flags, flagutil.ThrottlerDefaults(defaultTokens, defaultBurst))
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+
+	if o.tokensPerHour != defaultTokens {
+		if o.github.ThrottleHourlyTokens != defaultTokens {
+			return fmt.Errorf("--tokens cannot be specified with together with --github-hourly-tokens: use just the latter")
+		}
+		logrus.Warn("--tokens is deprecated: use --github-hourly-tokens instead")
+		o.github.ThrottleHourlyTokens = o.tokensPerHour
+	}
+	if o.tokenBurst != defaultBurst {
+		if o.github.ThrottleAllowBurst != defaultBurst {
+			return fmt.Errorf("--token-burst cannot be specified with together with --github-allowed-burst: use just the latter")
+		}
+		logrus.Warn("--token-burst is deprecated: use --github-allowed-burst instead")
+		o.github.ThrottleAllowBurst = o.tokenBurst
+	}
+
 	if err := o.github.Validate(!o.confirm); err != nil {
 		return err
-	}
-	if o.tokensPerHour > 0 && o.tokenBurst >= o.tokensPerHour {
-		return fmt.Errorf("--tokens=%d must exceed --token-burst=%d", o.tokensPerHour, o.tokenBurst)
 	}
 
 	if o.minAdmins < 2 {
@@ -153,16 +169,13 @@ func main() {
 	o := parseOptions()
 
 	secretAgent := &secret.Agent{}
-	if err := secretAgent.Start([]string{o.github.TokenPath}); err != nil {
+	if err := secretAgent.Start(nil); err != nil {
 		logrus.WithError(err).Fatal("Error starting secrets agent.")
 	}
 
 	githubClient, err := o.github.GitHubClient(secretAgent, !o.confirm)
 	if err != nil {
 		logrus.WithError(err).Fatal("Error getting GitHub client.")
-	}
-	if o.tokensPerHour > 0 {
-		githubClient.Throttle(o.tokensPerHour, o.tokenBurst) // 300 hourly tokens, bursts of 100 (default)
 	}
 
 	if o.dump != "" {
@@ -213,7 +226,7 @@ type dumpClient interface {
 	ListTeamRepos(org string, id int) ([]github.Repo, error)
 	GetRepo(owner, name string) (github.FullRepo, error)
 	GetRepos(org string, isUser bool) ([]github.Repo, error)
-	BotName() (string, error)
+	BotUser() (*github.UserData, error)
 }
 
 func dumpOrgConfig(client dumpClient, orgName string, ignoreSecretTeams bool) (*org.Config, error) {
@@ -235,7 +248,7 @@ func dumpOrgConfig(client dumpClient, orgName string, ignoreSecretTeams bool) (*
 	out.Metadata.MembersCanCreateRepositories = &meta.MembersCanCreateRepositories
 
 	var runningAsAdmin bool
-	runningAs, err := client.BotName()
+	runningAs, err := client.BotUser()
 	if err != nil {
 		return nil, fmt.Errorf("failed to obtain username for this token")
 	}
@@ -247,7 +260,7 @@ func dumpOrgConfig(client dumpClient, orgName string, ignoreSecretTeams bool) (*
 	for _, m := range admins {
 		logrus.WithField("login", m.Login).Debug("Recording admin.")
 		out.Admins = append(out.Admins, m.Login)
-		if runningAs == m.Login {
+		if runningAs.Login == m.Login {
 			runningAsAdmin = true
 		}
 	}
@@ -383,7 +396,7 @@ func dumpOrgConfig(client dumpClient, orgName string, ignoreSecretTeams bool) (*
 }
 
 type orgClient interface {
-	BotName() (string, error)
+	BotUser() (*github.UserData, error)
 	ListOrgMembers(org, role string) ([]github.TeamMember, error)
 	RemoveOrgMembership(org, user string) error
 	UpdateOrgMembership(org, user string, admin bool) (*github.OrgMembership, error)
@@ -408,10 +421,10 @@ func configureOrgMembers(opt options, client orgClient, orgName string, orgConfi
 		return fmt.Errorf("%s must specify %v as admins, missing %v", orgName, opt.requiredAdmins, missing)
 	}
 	if opt.requireSelf {
-		if me, err := client.BotName(); err != nil {
+		if me, err := client.BotUser(); err != nil {
 			return fmt.Errorf("cannot determine user making requests for %s: %v", opt.github.TokenPath, err)
-		} else if !wantAdmins.Has(me) {
-			return fmt.Errorf("authenticated user %s is not an admin of %s", me, orgName)
+		} else if !wantAdmins.Has(me.Login) {
+			return fmt.Errorf("authenticated user %s is not an admin of %s", me.Login, orgName)
 		}
 	}
 
@@ -558,10 +571,7 @@ func configureMembers(have, want memberships, invitees sets.String, adder func(u
 		}
 	}
 
-	if n := len(errs); n > 0 {
-		return fmt.Errorf("%d errors: %v", n, errs)
-	}
-	return nil
+	return utilerrors.NewAggregate(errs)
 }
 
 // findTeam returns teams[n] for the first n in [name, previousNames, ...] that is in teams.
@@ -1006,6 +1016,7 @@ func configureRepos(opt options, client repoClient, orgName string, orgConfig or
 				switch {
 				case existing == nil:
 					if full, err := client.GetRepo(orgName, repo.Name); err != nil {
+						repoLogger.WithError(err).Error("failed to get repository data")
 						allErrors = append(allErrors, err)
 					} else {
 						existing = &full
@@ -1023,13 +1034,14 @@ func configureRepos(opt options, client repoClient, orgName string, orgConfig or
 
 		if existing == nil {
 			if wantRepo.Archived != nil && *wantRepo.Archived {
-				repoLogger.Errorf("repo does not exist but is configured as archived: not creating")
+				repoLogger.Error("repo does not exist but is configured as archived: not creating")
 				allErrors = append(allErrors, fmt.Errorf("nonexistent repo configured as archived: %s", wantName))
 				continue
 			}
 			repoLogger.Info("repo does not exist, creating")
 			created, err := client.CreateRepo(orgName, false, newRepoCreateRequest(wantName, wantRepo))
 			if err != nil {
+				repoLogger.WithError(err).Error("failed to create repository")
 				allErrors = append(allErrors, err)
 			} else {
 				existing = created
@@ -1054,6 +1066,7 @@ func configureRepos(opt options, client repoClient, orgName string, orgConfig or
 			if delta.Defined() {
 				repoLogger.Info("repo exists and differs from desired state, updating")
 				if _, err := client.UpdateRepo(orgName, existing.Name, delta); err != nil {
+					repoLogger.WithError(err).Error("failed to update repository")
 					allErrors = append(allErrors, err)
 				}
 			}
@@ -1277,7 +1290,9 @@ func configureTeamMembers(client teamMembersClient, orgName string, gt github.Te
 		}
 		tm, err := client.UpdateTeamMembership(orgName, gt.ID, user, super)
 		if err != nil {
-			logrus.WithError(err).Warnf("UpdateTeamMembership(%d(%s), %s, %t) failed", gt.ID, gt.Name, user, super)
+			// Augment the error with the operation we attempted so that the error makes sense after return
+			err = fmt.Errorf("UpdateTeamMembership(%d(%s), %s, %t) failed: %v", gt.ID, gt.Name, user, super, err)
+			logrus.Warnf(err.Error())
 		} else if tm.State == github.StatePending {
 			logrus.Infof("Invited %s to %d(%s) as a %s", user, gt.ID, gt.Name, role)
 		} else {
@@ -1289,7 +1304,9 @@ func configureTeamMembers(client teamMembersClient, orgName string, gt github.Te
 	remover := func(user string) error {
 		err := client.RemoveTeamMembership(orgName, gt.ID, user)
 		if err != nil {
-			logrus.WithError(err).Warnf("RemoveTeamMembership(%d(%s), %s) failed", gt.ID, gt.Name, user)
+			// Augment the error with the operation we attempted so that the error makes sense after return
+			err = fmt.Errorf("RemoveTeamMembership(%d(%s), %s) failed: %v", gt.ID, gt.Name, user, err)
+			logrus.Warnf(err.Error())
 		} else {
 			logrus.Infof("Removed %s from team %d(%s)", user, gt.ID, gt.Name)
 		}

@@ -12,7 +12,7 @@ presubmits:
       preset-kind-volume-mounts: "true"
     spec:
       containers:
-      - image: k8s.gcr.io/ingress-nginx/e2e-test-runner:v20201029-g92de5212d@sha256:ab3e24d06a1cf152d39cb8c11f1c0dcbd99b20de0b183657e04d32c2d094c0bb
+      - image: k8s.gcr.io/ingress-nginx/e2e-test-runner:v20210104-g81a8d5cd8@sha256:bfd55f589ea998f961825a9d09158d766cf621d1b8fc5d8c905aba07d9794e08
         command:
         - ./hack/verify-boilerplate.sh
     annotations:
@@ -30,7 +30,7 @@ presubmits:
       preset-kind-volume-mounts: "true"
     spec:
       containers:
-      - image: k8s.gcr.io/ingress-nginx/e2e-test-runner:v20201029-g92de5212d@sha256:ab3e24d06a1cf152d39cb8c11f1c0dcbd99b20de0b183657e04d32c2d094c0bb
+      - image: k8s.gcr.io/ingress-nginx/e2e-test-runner:v20210104-g81a8d5cd8@sha256:bfd55f589ea998f961825a9d09158d766cf621d1b8fc5d8c905aba07d9794e08
         command:
         - ./hack/verify-codegen.sh
     annotations:
@@ -47,7 +47,7 @@ presubmits:
       preset-kind-volume-mounts: "true"
     spec:
       containers:
-      - image: k8s.gcr.io/ingress-nginx/e2e-test-runner:v20201029-g92de5212d@sha256:ab3e24d06a1cf152d39cb8c11f1c0dcbd99b20de0b183657e04d32c2d094c0bb
+      - image: k8s.gcr.io/ingress-nginx/e2e-test-runner:v20210104-g81a8d5cd8@sha256:bfd55f589ea998f961825a9d09158d766cf621d1b8fc5d8c905aba07d9794e08
         command:
         - ./hack/verify-gofmt.sh
     annotations:
@@ -66,7 +66,7 @@ presubmits:
       preset-kind-volume-mounts: "true"
     spec:
       containers:
-      - image: k8s.gcr.io/ingress-nginx/e2e-test-runner:v20201029-g92de5212d@sha256:ab3e24d06a1cf152d39cb8c11f1c0dcbd99b20de0b183657e04d32c2d094c0bb
+      - image: k8s.gcr.io/ingress-nginx/e2e-test-runner:v20210104-g81a8d5cd8@sha256:bfd55f589ea998f961825a9d09158d766cf621d1b8fc5d8c905aba07d9794e08
         command:
         - ./hack/verify-golint.sh
     annotations:
@@ -83,7 +83,7 @@ presubmits:
       preset-kind-volume-mounts: "true"
     spec:
       containers:
-      - image: k8s.gcr.io/ingress-nginx/e2e-test-runner:v20201029-g92de5212d@sha256:ab3e24d06a1cf152d39cb8c11f1c0dcbd99b20de0b183657e04d32c2d094c0bb
+      - image: k8s.gcr.io/ingress-nginx/e2e-test-runner:v20210104-g81a8d5cd8@sha256:bfd55f589ea998f961825a9d09158d766cf621d1b8fc5d8c905aba07d9794e08
         command:
         - ./hack/verify-lualint.sh
     annotations:
@@ -102,7 +102,7 @@ presubmits:
       preset-kind-volume-mounts: "true"
     spec:
       containers:
-      - image: k8s.gcr.io/ingress-nginx/e2e-test-runner:v20201029-g92de5212d@sha256:ab3e24d06a1cf152d39cb8c11f1c0dcbd99b20de0b183657e04d32c2d094c0bb
+      - image: k8s.gcr.io/ingress-nginx/e2e-test-runner:v20210104-g81a8d5cd8@sha256:bfd55f589ea998f961825a9d09158d766cf621d1b8fc5d8c905aba07d9794e08
         command:
         - ./hack/verify-chart-lint.sh
     annotations:
@@ -121,7 +121,7 @@ presubmits:
       preset-kind-volume-mounts: "true"
     spec:
       containers:
-      - image: k8s.gcr.io/ingress-nginx/e2e-test-runner:v20201029-g92de5212d@sha256:ab3e24d06a1cf152d39cb8c11f1c0dcbd99b20de0b183657e04d32c2d094c0bb
+      - image: k8s.gcr.io/ingress-nginx/e2e-test-runner:v20210104-g81a8d5cd8@sha256:bfd55f589ea998f961825a9d09158d766cf621d1b8fc5d8c905aba07d9794e08
         command:
         - make
         - lua-test
@@ -141,24 +141,10 @@ presubmits:
       preset-kind-volume-mounts: "true"
     spec:
       containers:
-      - image: k8s.gcr.io/ingress-nginx/e2e-test-runner:v20201029-g92de5212d@sha256:ab3e24d06a1cf152d39cb8c11f1c0dcbd99b20de0b183657e04d32c2d094c0bb
+      - image: k8s.gcr.io/ingress-nginx/e2e-test-runner:v20210104-g81a8d5cd8@sha256:bfd55f589ea998f961825a9d09158d766cf621d1b8fc5d8c905aba07d9794e08
         command:
-        - /bin/bash
-        - -c
-        - "GIT_COMMIT=${PULL_PULL_SHA} make cover"
-        env:
-        - name: CODECOV_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: ingress-nginx-codecov-token
-              key: ingress-nginx-codecov-token
-    volumes:
-    - name: ingress-nginx-codecov-token
-      secret:
-        secretName: ingress-nginx-codecov-token
-        items:
-        - key: ingress-nginx-codecov-token
-          path: ingress-nginx-codecov-token
+        - make
+        - test
     annotations:
       testgrid-dashboards: sig-network-ingress-nginx
       testgrid-tab-name: test
@@ -176,7 +162,7 @@ presubmits:
       preset-dind-enabled: "true"
     spec:
       containers:
-      - image: gcr.io/k8s-testimages/krte:v20201124-be2d6d8-master
+      - image: gcr.io/k8s-testimages/krte:v20210512-b8d1b30-master
         command:
           - wrapper.sh
           - bash
@@ -207,7 +193,7 @@ presubmits:
       preset-dind-enabled: "true"
     spec:
       containers:
-      - image: gcr.io/k8s-testimages/krte:v20201124-be2d6d8-master
+      - image: gcr.io/k8s-testimages/krte:v20210512-b8d1b30-master
         command:
           - wrapper.sh
           - bash
@@ -238,7 +224,7 @@ presubmits:
       preset-dind-enabled: "true"
     spec:
       containers:
-      - image: gcr.io/k8s-testimages/krte:v20201124-be2d6d8-master
+      - image: gcr.io/k8s-testimages/krte:v20210512-b8d1b30-master
         command:
           - wrapper.sh
           - bash
@@ -269,7 +255,7 @@ presubmits:
       preset-dind-enabled: "true"
     spec:
       containers:
-      - image: gcr.io/k8s-testimages/krte:v20201124-be2d6d8-master
+      - image: gcr.io/k8s-testimages/krte:v20210512-b8d1b30-master
         command:
           - wrapper.sh
           - bash
@@ -300,7 +286,7 @@ presubmits:
       preset-dind-enabled: "true"
     spec:
       containers:
-      - image: gcr.io/k8s-testimages/krte:v20201124-be2d6d8-master
+      - image: gcr.io/k8s-testimages/krte:v20210512-b8d1b30-master
         command:
           - wrapper.sh
           - bash
@@ -337,7 +323,7 @@ periodics:
     preset-dind-enabled: "true"
   spec:
     containers:
-    - image: gcr.io/k8s-testimages/krte:v20201124-be2d6d8-master
+    - image: gcr.io/k8s-testimages/krte:v20210512-b8d1b30-master
       command:
         - wrapper.sh
         - bash

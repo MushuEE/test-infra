@@ -47,9 +47,15 @@ import (
 	"k8s.io/test-infra/prow/kube"
 	"k8s.io/test-infra/prow/pjutil"
 	"k8s.io/test-infra/prow/pod-utils/decorate"
+	"k8s.io/test-infra/prow/version"
 )
 
 const ControllerName = "plank"
+
+// PodStatus constants
+const (
+	Evicted = "Evicted"
+)
 
 func Add(
 	mgr controllerruntime.Manager,
@@ -161,6 +167,7 @@ func (r *reconciler) syncMetrics(ctx context.Context) error {
 				continue
 			}
 			kube.GatherProwJobMetrics(r.log, pjs.Items)
+			version.GatherProwVersion(r.log)
 		}
 	}
 }
@@ -183,9 +190,11 @@ func (r *reconciler) defaultReconcile(ctx context.Context, request reconcile.Req
 		return reconcile.Result{}, nil
 	}
 
-	// TODO: Terminal errors for unfixable cases like missing build clusters
-	// and not return an error to prevent requeuing?
 	res, err := r.serializeIfNeeded(ctx, pj)
+	if IsTerminalError(err) {
+		// Unfixable cases like missing build clusters, do not return an error to prevent requeuing
+		return reconcile.Result{}, nil
+	}
 	if res == nil {
 		res = &reconcile.Result{}
 	}
@@ -544,12 +553,11 @@ func (r *reconciler) syncAbortedJob(ctx context.Context, pj *prowv1.ProwJob) err
 	return r.pjClient.Patch(ctx, pj, ctrlruntimeclient.MergeFrom(originalPJ))
 }
 
+// pod Gets pod for a pj, returns pod, whether pod exist, and error.
 func (r *reconciler) pod(ctx context.Context, pj *prowv1.ProwJob) (*corev1.Pod, bool, error) {
 	buildClient, buildClientExists := r.buildClients[pj.ClusterAlias()]
 	if !buildClientExists {
-		// TODO: Use terminal error type to prevent requeuing, this wont be fixed without
-		// a restart
-		return nil, false, fmt.Errorf("no build client found for cluster %q", pj.ClusterAlias())
+		return nil, false, TerminalError(fmt.Errorf("no build client found for cluster %q", pj.ClusterAlias()))
 	}
 
 	pod := &corev1.Pod{}
@@ -571,9 +579,7 @@ func (r *reconciler) pod(ctx context.Context, pj *prowv1.ProwJob) (*corev1.Pod, 
 func (r *reconciler) deletePod(ctx context.Context, pj *prowv1.ProwJob) error {
 	buildClient, buildClientExists := r.buildClients[pj.ClusterAlias()]
 	if !buildClientExists {
-		// TODO: Use terminal error type to prevent requeuing, this wont be fixed without
-		// a restart
-		return fmt.Errorf("no build client found for cluster %q", pj.ClusterAlias())
+		return TerminalError(fmt.Errorf("no build client found for cluster %q", pj.ClusterAlias()))
 	}
 
 	pod := &corev1.Pod{
@@ -603,11 +609,12 @@ func (r *reconciler) startPod(ctx context.Context, pj *prowv1.ProwJob) (string, 
 		return "", "", err
 	}
 	pod.Namespace = r.config().PodNamespace
+	// Add prow version as a label for better debugging prowjobs.
+	pod.ObjectMeta.Labels[kube.PlankVersionLabel] = version.Version
 
 	client, ok := r.buildClients[pj.ClusterAlias()]
 	if !ok {
-		// TODO: Terminal error to prevent requeuing
-		return "", "", fmt.Errorf("unknown cluster alias %q", pj.ClusterAlias())
+		return "", "", TerminalError(fmt.Errorf("unknown cluster alias %q", pj.ClusterAlias()))
 	}
 	err = client.Create(ctx, pod)
 	r.log.WithFields(pjutil.ProwJobFields(pj)).Debug("Create Pod.")
@@ -618,7 +625,7 @@ func (r *reconciler) startPod(ctx context.Context, pj *prowv1.ProwJob) (string, 
 	// We must block until we see the pod, otherwise a new reconciliation may be triggered that tries to create
 	// the pod because its not in the cache yet, errors with IsAlreadyExists and sets the prowjob to failed
 	podName := types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}
-	if err := wait.Poll(100*time.Millisecond, 2*time.Second, func() (bool, error) {
+	if err := wait.Poll(100*time.Millisecond, 10*time.Second, func() (bool, error) {
 		if err := client.Get(ctx, podName, pod); err != nil {
 			if kerrors.IsNotFound(err) {
 				return false, nil
@@ -802,4 +809,30 @@ func didPodSucceed(p *corev1.Pod) bool {
 	}
 
 	return true
+}
+
+func getPodBuildID(pod *corev1.Pod) string {
+	if buildID, ok := pod.ObjectMeta.Labels[kube.ProwBuildIDLabel]; ok && buildID != "" {
+		return buildID
+	}
+
+	// For backwards compatibility: existing pods may not have the buildID label.
+	for _, env := range pod.Spec.Containers[0].Env {
+		if env.Name == "BUILD_ID" {
+			return env.Value
+		}
+	}
+
+	logrus.Warningf("BUILD_ID was not found in pod %q: streaming logs from deck will not work", pod.ObjectMeta.Name)
+	return ""
+}
+
+// isRequestError extracts an HTTP status code from a kerrors.APIStatus and
+// returns true if it is a 4xx error.
+func isRequestError(err error) bool {
+	code := 500 // This is what kerrors.ReasonForError() defaults to.
+	if statusErr, ok := err.(kerrors.APIStatus); ok {
+		code = int(statusErr.Status().Code)
+	}
+	return 400 <= code && code < 500
 }

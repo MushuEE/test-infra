@@ -103,7 +103,6 @@ func helpProvider(config *plugins.Configuration, enabledRepos []config.OrgRepo) 
 }
 
 type gitHubClient interface {
-	BotName() (string, error)
 	IsMember(org, user string) (bool, error)
 	IsCollaborator(org, repo, user string) (bool, error)
 	CreateComment(owner, repo string, number int, comment string) error
@@ -114,6 +113,7 @@ type gitHubClient interface {
 	ListPRCommits(org, repo string, number int) ([]github.RepositoryCommit, error)
 	GetPullRequest(owner, repo string, number int) (*github.PullRequest, error)
 	GetCombinedStatus(org, repo, ref string) (*github.CombinedStatus, error)
+	BotUserChecker() (func(candidate string) bool, error)
 }
 
 type commentPruner interface {

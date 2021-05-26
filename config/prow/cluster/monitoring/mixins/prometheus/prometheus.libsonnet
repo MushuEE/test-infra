@@ -7,8 +7,11 @@
 (import 'ghproxy_alerts.libsonnet') +
 (import 'hook_alert.libsonnet') +
 (import 'sinker_alerts.libsonnet') +
+(import 'stale_alerts.libsonnet') +
 (import 'tide_alerts.libsonnet') +
 (import 'prober_alerts.libsonnet') +
 (import 'boskos_alerts.libsonnet') +
 (import 'plank_alerts.libsonnet') +
-(import 'slo_recordrules.libsonnet')
+(import 'slo_recordrules.libsonnet') +
+(import 'prow_alerts.libsonnet') +
+(import 'external_secret_alerts.libsonnet')

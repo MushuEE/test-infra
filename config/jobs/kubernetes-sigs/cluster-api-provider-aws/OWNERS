@@ -9,8 +9,9 @@ reviewers:
 - ingvagabund
 - kris-nova
 - luxas
-- ncdc
 - randomvariable
+- richardcase
+- sedefsavas
 - timothysc
 - vincepri
 approvers:
@@ -22,7 +23,12 @@ approvers:
 - ingvagabund
 - kris-nova
 - luxas
-- ncdc
 - randomvariable
+- richardcase
+- sedefsavas
 - timothysc
 - vincepri
+emeritus_reviewers:
+  - ncdc
+emeritus_approvers:
+  - ncdc

@@ -42,6 +42,7 @@ const (
 )
 
 type Client struct {
+	// Keys are <imageHost>/<imageName>:<currentTag>. Values are corresponding tags.
 	tagCache   map[string]string
 	httpClient http.Client
 }
@@ -58,6 +59,41 @@ type manifest map[string]struct {
 	Tags          []string `json:"tag"`
 }
 
+// commit | tag-n-gcommit
+var commitRegexp = regexp.MustCompile(`^g?([\da-f]+)|(.+?)??(?:-(\d+)-g([\da-f]+))?$`)
+
+// DeconstructCommit separates a git describe commit into its parts.
+
+//
+// Examples:
+//  v0.0.30-14-gdeadbeef => (v0.0.30 14 deadbeef)
+//  v0.0.30 => (v0.0.30 0 "")
+//  deadbeef => ("", 0, deadbeef)
+//
+// See man git describe.
+func DeconstructCommit(commit string) (string, int, string) {
+	parts := commitRegexp.FindStringSubmatch(commit)
+	if parts == nil {
+		return "", 0, ""
+	}
+	if parts[1] != "" {
+		return "", 0, parts[1]
+	}
+	var n int
+	if s := parts[3]; s != "" {
+		var err error
+		n, err = strconv.Atoi(s)
+		if err != nil {
+			panic(err)
+		}
+	}
+	return parts[2], n, parts[4]
+}
+
+// DeconstructTag separates the tag into its vDATE-COMMIT-VARIANT components
+//
+// COMMIT may be in the form vTAG-NEW-gCOMMIT, use PureCommit to further process
+// this down to COMMIT.
 func DeconstructTag(tag string) (date, commit, variant string) {
 	currentTagParts := tagRegexp.FindStringSubmatch(tag)
 	if currentTagParts == nil {
@@ -65,6 +101,24 @@ func DeconstructTag(tag string) (date, commit, variant string) {
 	}
 	parts := strings.Split(currentTagParts[tagVersionPart], "-")
 	return parts[0][1:], parts[len(parts)-1], currentTagParts[tagExtraPart]
+}
+
+func (cli *Client) getManifest(imageHost, imageName string) (manifest, error) {
+	resp, err := cli.httpClient.Get("https://" + imageHost + "/v2/" + imageName + "/tags/list")
+	if err != nil {
+		return nil, fmt.Errorf("couldn't fetch tag list: %v", err)
+	}
+	defer resp.Body.Close()
+
+	result := struct {
+		Manifest manifest `json:"manifest"`
+	}{}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("couldn't parse tag information from registry: %v", err)
+	}
+
+	return result.Manifest, nil
 }
 
 // FindLatestTag returns the latest valid tag for the given image.
@@ -82,21 +136,12 @@ func (cli *Client) FindLatestTag(imageHost, imageName, currentTag string) (strin
 		return currentTag, nil
 	}
 
-	resp, err := cli.httpClient.Get("https://" + imageHost + "/v2/" + imageName + "/tags/list")
+	imageList, err := cli.getManifest(imageHost, imageName)
 	if err != nil {
-		return "", fmt.Errorf("couldn't fetch tag list: %v", err)
-	}
-	defer resp.Body.Close()
-
-	result := struct {
-		Manifest manifest `json:"manifest"`
-	}{}
-
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("couldn't parse tag information from registry: %v", err)
+		return "", err
 	}
 
-	latestTag, err := pickBestTag(currentTagParts, result.Manifest)
+	latestTag, err := pickBestTag(currentTagParts, imageList)
 	if err != nil {
 		return "", err
 	}
@@ -104,6 +149,23 @@ func (cli *Client) FindLatestTag(imageHost, imageName, currentTag string) (strin
 	cli.tagCache[k] = latestTag
 
 	return latestTag, nil
+}
+
+func (cli *Client) TagExists(imageHost, imageName, currentTag string) (bool, error) {
+	imageList, err := cli.getManifest(imageHost, imageName)
+	if err != nil {
+		return false, err
+	}
+
+	for _, v := range imageList {
+		for _, tag := range v.Tags {
+			if tag == currentTag {
+				return true, nil
+			}
+		}
+	}
+
+	return false, nil
 }
 
 func pickBestTag(currentTagParts []string, manifest manifest) (string, error) {
@@ -152,6 +214,11 @@ func pickBestTag(currentTagParts []string, manifest manifest) (string, error) {
 	}
 
 	return latestTag, nil
+}
+
+// AddToCache keeps track of changed tags
+func (cli *Client) AddToCache(image, newTag string) {
+	cli.tagCache[image] = newTag
 }
 
 func updateAllTags(tagPicker func(host, image, tag string) (string, error), content []byte, imageFilter *regexp.Regexp) []byte {

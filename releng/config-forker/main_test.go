@@ -492,39 +492,6 @@ func TestGeneratePresubmits(t *testing.T) {
 			},
 			{
 				JobBase: config.JobBase{
-					Name:        "pull-kubernetes-e2e-branch-in-name-master",
-					Annotations: map[string]string{forkAnnotation: "true"},
-				},
-				Brancher: config.Brancher{
-					SkipBranches: []string{`release-\d\.\d`},
-				},
-			},
-			{
-				JobBase: config.JobBase{
-					Name:        "pull-kubernetes-e2e-keep-context",
-					Annotations: map[string]string{forkAnnotation: "true"},
-				},
-				Brancher: config.Brancher{
-					SkipBranches: []string{`release-\d\.\d`},
-				},
-				Reporter: config.Reporter{
-					Context: "mycontext",
-				},
-			},
-			{
-				JobBase: config.JobBase{
-					Name:        "pull-kubernetes-e2e-replace-context",
-					Annotations: map[string]string{forkAnnotation: "true"},
-				},
-				Brancher: config.Brancher{
-					SkipBranches: []string{`release-\d\.\d`},
-				},
-				Reporter: config.Reporter{
-					Context: "mycontext-master",
-				},
-			},
-			{
-				JobBase: config.JobBase{
 					Name: "pull-replace-some-things",
 					Annotations: map[string]string{
 						forkAnnotation:                 "true",
@@ -559,55 +526,16 @@ func TestGeneratePresubmits(t *testing.T) {
 		"kubernetes/kubernetes": {
 			{
 				JobBase: config.JobBase{
-					Name:        "pull-kubernetes-e2e-1.15",
+					Name:        "pull-kubernetes-e2e",
 					Annotations: map[string]string{},
 				},
 				Brancher: config.Brancher{
 					Branches: []string{"release-1.15"},
 				},
-				Reporter: config.Reporter{
-					Context: "pull-kubernetes-e2e-1.15",
-				},
 			},
 			{
 				JobBase: config.JobBase{
-					Name:        "pull-kubernetes-e2e-branch-in-name-1.15",
-					Annotations: map[string]string{},
-				},
-				Brancher: config.Brancher{
-					Branches: []string{"release-1.15"},
-				},
-				Reporter: config.Reporter{
-					Context: "pull-kubernetes-e2e-branch-in-name-1.15",
-				},
-			},
-			{
-				JobBase: config.JobBase{
-					Name:        "pull-kubernetes-e2e-keep-context-1.15",
-					Annotations: map[string]string{},
-				},
-				Brancher: config.Brancher{
-					Branches: []string{"release-1.15"},
-				},
-				Reporter: config.Reporter{
-					Context: "mycontext",
-				},
-			},
-			{
-				JobBase: config.JobBase{
-					Name:        "pull-kubernetes-e2e-replace-context-1.15",
-					Annotations: map[string]string{},
-				},
-				Brancher: config.Brancher{
-					Branches: []string{"release-1.15"},
-				},
-				Reporter: config.Reporter{
-					Context: "mycontext-1.15",
-				},
-			},
-			{
-				JobBase: config.JobBase{
-					Name: "pull-replace-some-things-1.15",
+					Name: "pull-replace-some-things",
 					Annotations: map[string]string{
 						"some-annotation": "yup",
 					},
@@ -624,9 +552,6 @@ func TestGeneratePresubmits(t *testing.T) {
 				Brancher: config.Brancher{
 					Branches: []string{"release-1.15"},
 				},
-				Reporter: config.Reporter{
-					Context: "pull-replace-some-things-1.15",
-				},
 			},
 		},
 	}
@@ -637,7 +562,7 @@ func TestGeneratePresubmits(t *testing.T) {
 	}
 
 	if !reflect.DeepEqual(result, expected) {
-		t.Errorf("Result does not match expected. Difference:\n%s", cmp.Diff(expected, result, cmpopts.IgnoreUnexported(config.Brancher{}, config.RegexpChangeMatcher{}, config.Presubmit{})))
+		t.Errorf("Result does not match expected. Difference:\n%s", diff.ObjectDiff(expected, result))
 	}
 }
 
@@ -778,7 +703,7 @@ func TestGeneratePeriodics(t *testing.T) {
 	}
 
 	if !reflect.DeepEqual(result, expected) {
-		t.Errorf("Result does not match expected. Difference:\n%s", diff.ObjectDiff(expected, result))
+		t.Errorf("Result does not match expected. Difference:\n%s\n", cmp.Diff(expected, result, cmpopts.IgnoreUnexported(config.Periodic{})))
 	}
 }
 

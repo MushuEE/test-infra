@@ -23,7 +23,6 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
-	"os/exec"
 	"path"
 	"time"
 
@@ -73,8 +72,9 @@ type ServicePrincipalProfile struct {
 }
 
 type LinuxProfile struct {
-	AdminUsername string `json:"adminUsername"`
-	SSHKeys       *SSH   `json:"ssh"`
+	RunUnattendedUpgradesOnBootstrap bool   `json:"runUnattendedUpgradesOnBootstrap"`
+	AdminUsername                    string `json:"adminUsername"`
+	SSHKeys                          *SSH   `json:"ssh"`
 }
 
 type SSH struct {
@@ -193,6 +193,7 @@ type MasterProfile struct {
 	OSDiskSizeGB        int                 `json:"osDiskSizeGB,omitempty" validate:"min=0,max=1023"`
 	AvailabilityProfile string              `json:"availabilityProfile,omitempty"`
 	AvailabilityZones   []string            `json:"availabilityZones,omitempty"`
+	UltraSSDEnabled     bool                `json:"ultraSSDEnabled,omitempty"`
 }
 
 type AgentPoolProfile struct {
@@ -209,6 +210,7 @@ type AgentPoolProfile struct {
 	OSDiskSizeGB           int                 `json:"osDiskSizeGB,omitempty" validate:"min=0,max=1023"`
 	EnableVMSSNodePublicIP bool                `json:"enableVMSSNodePublicIP,omitempty"`
 	StorageProfile         string              `json:"storageProfile,omitempty"`
+	UltraSSDEnabled        bool                `json:"ultraSSDEnabled,omitempty"`
 }
 
 type AzureClient struct {
@@ -481,32 +483,4 @@ func toBool(b *bool) bool {
 		return false
 	}
 	return *b
-}
-
-func installAzureCLI() error {
-	if err := control.FinishRunning(exec.Command("curl", "-sL", "https://packages.microsoft.com/keys/microsoft.asc", "-o", "msft.asc")); err != nil {
-		return err
-	}
-
-	if err := control.FinishRunning(exec.Command("gpg", "--batch", "--yes", "-o", "/etc/apt/trusted.gpg.d/microsoft.asc.gpg", "--dearmor", "msft.asc")); err != nil {
-		return err
-	}
-
-	if err := control.FinishRunning(exec.Command("bash", "-c", "echo \"deb [arch=amd64] https://packages.microsoft.com/repos/azure-cli $(lsb_release -cs) main\" | tee /etc/apt/sources.list.d/azure-cli.list")); err != nil {
-		return err
-	}
-
-	if err := control.FinishRunning(exec.Command("apt-get", "update")); err != nil {
-		return err
-	}
-
-	if err := control.FinishRunning(exec.Command("apt-get", "install", "-y", "azure-cli")); err != nil {
-		return err
-	}
-
-	if err := os.Remove("msft.asc"); err != nil {
-		return err
-	}
-
-	return nil
 }

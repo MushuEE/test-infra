@@ -58,6 +58,7 @@ bq query --allow_large_results --headless --max_rows 0 --replace --destination_t
     test.failed
     and timestamp_to_sec(started) > TIMESTAMP_TO_SEC(DATE_ADD(CURRENT_DATE(), -14, 'DAY'))
     and job != 'ci-kubernetes-coverage-unit'"
+
 gsutil rm gs://k8s-gubernator/triage_tests/shard_*.json.gz || true
 bq extract --compression GZIP --destination_format NEWLINE_DELIMITED_JSON 'k8s-gubernator:temp.triage' gs://k8s-gubernator/triage_tests/shard_*.json.gz
 mkdir -p triage_tests
